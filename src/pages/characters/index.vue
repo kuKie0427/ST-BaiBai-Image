@@ -6,6 +6,19 @@ import ModalMask from '@/components/ModalMask.vue';
 import { generateCharTags } from '@/autoTag/charAnchors';
 import { readBookMemory } from '@/autoTag/bookMemory';
 import {
+  findCharPortrait,
+  isPortraitStale,
+  removePortrait,
+  resolveCharPortrait,
+  type CharPortraitEntry,
+} from '@/state/charPortraits';
+import {
+  cleanupPortrait,
+  findGlobalPortrait,
+  promotePortraitToGlobal,
+  setGlobalPortrait,
+} from '@/state/charPortraitsGlobal';
+import {
   CHAR_TAG_FIELDS,
   CHAR_TAG_FIELD_LABELS,
   buildEntryTag,
@@ -22,6 +35,7 @@ import {
 } from '@/state/charTags';
 import {
   copyGlobalCharTagToChat,
+  findGlobalCharTag,
   globalCharTagLib,
   promoteCharTagToGlobal,
   removeGlobalCharTag,
@@ -29,6 +43,8 @@ import {
 } from '@/state/globalCharTags';
 import { getContext } from '@/st/context';
 import { computed, ref } from 'vue';
+
+import PortraitModal from './PortraitModal.vue';
 
 /**
  * 角色管理 —— 两层固定外貌库:
@@ -63,6 +79,131 @@ const historyOpen = ref(false);
 const confirmRollbackOpen = ref(false);
 const pendingRollback = ref<{ name: string; record: CharTagChangeRecord } | null>(null);
 
+/* —— 人设图:卡片缩略图 / 过期药丸 / 选图弹窗 ——
+ * 人设图库与角色库平行存在(charPortraits / charPortraitsGlobal),卡片只做派生展示:
+ * 缩略图、过期与否都是实时算的,不做本地副本 —— AI 改档、选图、提升、删除都会自动反映。 */
+
+interface CardPortraitState {
+  selected: CharPortraitEntry['selected'];
+  stale: boolean;
+}
+
+const NO_PORTRAIT: CardPortraitState = { selected: null, stale: false };
+
+/**
+ * 全表一次算完,模板按 scope:name 取(每张卡各建 computed 在 v-for 里既啰嗦又易漏依赖)。
+ * 依赖链:charTagLib(外观) + charPortraitLib/globalCharPortraitLib(人设图)—— 都是响应式的。
+ */
+const portraitStates = computed(() => {
+  const states = new Map<string, CardPortraitState>();
+  const put = (scope: Scope, name: string, appearanceTag: string, portrait: CharPortraitEntry | undefined) => {
+    states.set(`${scope}:${name}`, {
+      selected: portrait?.selected ?? null,
+      stale: portrait ? isPortraitStale(portrait, appearanceTag) : false,
+    });
+  };
+  // 本聊天卡:chat 优先、全局补空缺(与生成时的解析口径一致)
+  for (const entry of charTagLib.entries) {
+    put('chat', entry.name, buildEntryTag(entry), resolveCharPortrait(entry.name));
+  }
+  // 全局卡只认全局人设图库:本聊天的同名副本不该改变全局卡片的展示
+  for (const entry of globalCharTagLib.entries) {
+    put('global', entry.name, buildEntryTag(entry), findGlobalPortrait(entry.name));
+  }
+  return states;
+});
+
+function portraitState(name: string, scope: Scope): CardPortraitState {
+  return portraitStates.value.get(`${scope}:${name}`) ?? NO_PORTRAIT;
+}
+
+/** 选图弹窗的目标:卡片/编辑弹窗点「人设图」时写入,关闭时清空。 */
+const portraitTarget = ref<{
+  name: string;
+  scope: Scope;
+  /** 打开前本聊天是否已有同名条目(仅全局卡用):决定选完图后要不要清掉本次顺带建的那条。 */
+  hadChatPortrait: boolean;
+} | null>(null);
+
+/** 弹窗入参:外观 tag 取当前派生档案(findCharTag),变体与选中项取对应作用域的人设图库。 */
+const portraitTargetState = computed(() => {
+  const target = portraitTarget.value;
+  if (!target) return null;
+  const tagEntry =
+    target.scope === 'global'
+      ? (findGlobalCharTag(target.name) ?? findCharTag(target.name))
+      : findCharTag(target.name);
+  if (!tagEntry) return null;
+  const portrait =
+    target.scope === 'global' ? findGlobalPortrait(target.name) : resolveCharPortrait(target.name);
+  return {
+    name: target.name,
+    appearanceTag: buildEntryTag(tagEntry),
+    variants: portrait?.variants ?? [],
+    selected: portrait?.selected ?? null,
+  };
+});
+
+function openPortrait(name: string, scope: Scope): void {
+  portraitTarget.value = { name, scope, hadChatPortrait: !!findCharPortrait(name) };
+}
+
+function closePortrait(): void {
+  portraitTarget.value = null;
+}
+
+/**
+ * 选图落库后的收尾。
+ *
+ * 本聊天卡不用做事 —— setSelected 写的就是本聊天库,卡片是派生展示,自动刷新。
+ *
+ * 全局卡必须把结果搬进全局库:弹窗服务层只会写本聊天库,而全局卡的缩略图与
+ * 后续注入都只认全局库;不搬的话用户选完图看不到变化,其他聊天也拿不到。语义上
+ * 也该如此:全局角色本就「哪个聊天都是同一张脸」,人设图跟着全局走。
+ *
+ * 搬运口径:
+ * - 变体**沿用全局条目**(本聊天这条是落库顺带建的,变体可能是空的),只取新选中项;
+ * - 本聊天原本没有同名条目 → 搬完删掉这条,否则它会按「本聊天优先」遮住刚写入的
+ *   全局条目;原本就有(用户在本聊天的覆盖)→ 保留,它的选中项已被同一张图覆盖,
+ *   两边指向同一份 vibe,不冲突。
+ */
+function onPortraitCommitted(): void {
+  const target = portraitTarget.value;
+  if (!target || target.scope !== 'global') return;
+  const chatEntry = findCharPortrait(target.name);
+  const selected = chatEntry?.selected ?? null;
+  if (!selected) return;
+  const globalEntry = findGlobalPortrait(target.name);
+  const variants = (globalEntry?.variants.length ? globalEntry.variants : (chatEntry?.variants ?? [])).map(
+    variant => ({ ...variant }),
+  );
+  if (!setGlobalPortrait({ name: target.name, variants, selected })) return;
+  if (!target.hadChatPortrait) removePortrait(target.name);
+}
+
+/** 编辑弹窗里的「重新生成人设图」:只在已设置且已过期时出现(未设置走卡片按钮即可)。 */
+const editingPortraitStale = computed(() => {
+  const name = editingName.value;
+  if (!name) return false;
+  return portraitState(name, editingScope.value).stale;
+});
+
+/**
+ * 从编辑弹窗转去生成人设图。锚点用的是**已保存**的外貌(人设图库按名字读派生档案),
+ * 所以草稿里改了外貌却没保存时必须先拦一下:否则新图会按旧档锚定,点「完成」立刻又过期。
+ */
+function openPortraitForEditing(): void {
+  const name = editingName.value;
+  if (!name) return;
+  const saved =
+    editingScope.value === 'global' ? findGlobalCharTag(name) : findCharTag(name);
+  if (saved && buildEntryTag(saved) !== previewTag.value) {
+    toastr.info('外貌还有未保存的修改,先点「完成」保存,再生成人设图', '柏宝绘');
+    return;
+  }
+  openPortrait(name, editingScope.value);
+}
+
 const FIELD_PLACEHOLDERS: Record<CharTagField, string> = {
   fandom: '同人角色填: character name (copyright name), 不带转义括号; 原创留空',
   sex: '如 1girl / 1boy',
@@ -86,6 +227,14 @@ const chatEntries = computed(() =>
   charTagLib.entries.filter(
     entry => charTagBaseNames.has(entry.name) || !globalNameSet.value.has(entry.name),
   ),
+);
+
+/** 卡片行:条目 + 该条目的人设图派生态(每张卡只查一次 map,模板里直接读)。 */
+const chatRows = computed(() =>
+  chatEntries.value.map(entry => ({ entry, portrait: portraitState(entry.name, 'chat') })),
+);
+const globalRows = computed(() =>
+  globalCharTagLib.entries.map(entry => ({ entry, portrait: portraitState(entry.name, 'global') })),
 );
 
 /** 是否整串模式:有 raw 且没有字段。 */
@@ -219,12 +368,26 @@ const confirmDeleteOpen = ref(false);
 function askRemove() {
   confirmDeleteOpen.value = true;
 }
-function confirmRemove() {
+/**
+ * 删角色时人设图跟着走(变体 + 选中项 + vibe 文件)。清理是**尽力而为**:
+ * 失败只在控制台留痕,绝不回滚或打断已经完成的角色删除。
+ */
+async function cleanupPortraitQuietly(name: string, scope: Scope): Promise<void> {
+  try {
+    await cleanupPortrait(name, scope === 'global' ? { global: true } : {});
+  } catch (error) {
+    console.warn('[柏宝绘] 角色已删除,但人设图清理失败', error);
+  }
+}
+async function confirmRemove() {
   confirmDeleteOpen.value = false;
-  if (!editingName.value) return;
-  if (editingScope.value === 'global') removeGlobalCharTag(editingName.value);
-  else removeCharTag(editingName.value);
+  const name = editingName.value;
+  if (!name) return;
+  const scope = editingScope.value;
+  if (scope === 'global') removeGlobalCharTag(name);
+  else removeCharTag(name);
   closeEntry();
+  await cleanupPortraitQuietly(name, scope);
 }
 
 /* —— 提升为全局 / 复制到本聊天 —— */
@@ -234,9 +397,12 @@ function askPromote() {
 }
 function confirmPromote() {
   confirmPromoteOpen.value = false;
-  if (!editingName.value) return;
-  if (promoteCharTagToGlobal(editingName.value)) {
-    toastr.success(`「${editingName.value}」已提升为全局角色,所有聊天生效`, '柏宝绘');
+  const name = editingName.value;
+  if (!name) return;
+  if (promoteCharTagToGlobal(name)) {
+    // 人设图一并提升:本聊天条目搬进全局库,之后任何聊天都能解析到
+    promotePortraitToGlobal(name);
+    toastr.success(`「${name}」已提升为全局角色,所有聊天生效`, '柏宝绘');
   }
   closeEntry();
 }
@@ -312,6 +478,8 @@ function confirmRollback() {
   if (!p) return;
   if (rollbackCharTag(p.name, p.record)) {
     toastr.success(`已回滚「${p.name}」的${fieldLabel(p.record.field)}变更`, '柏宝绘');
+    // 回滚「建档」等于删掉整个角色条目,人设图随条目一起清(尽力而为,不阻塞回滚结果)
+    if (p.record.field === 'new') void cleanupPortraitQuietly(p.name, 'chat');
   } else {
     toastr.warning('回滚失败:条目可能已删除', '柏宝绘');
   }
@@ -360,24 +528,53 @@ function sourceLabel(entry: CharTagEntry): string {
             所有聊天生效,仅手动维护——AI 不会修改全局角色,适合玩家角色等固定形象。本聊天有同名角色时以本聊天为准。
           </p>
           <ul v-if="globalCharTagLib.entries.length" class="bbi-char-grid">
-          <li v-for="entry in globalCharTagLib.entries" :key="entry.name" class="bbi-char-card">
-            <button class="bbi-char-card-btn" type="button" @click="openEntry(entry, 'global')">
+          <li v-for="row in globalRows" :key="row.entry.name" class="bbi-char-card">
+            <button class="bbi-char-card-btn" type="button" @click="openEntry(row.entry, 'global')">
               <span class="bbi-char-card-head">
-                <span class="bbi-char-name">{{ entry.name }}</span>
+                <span class="bbi-char-name">{{ row.entry.name }}</span>
                 <span class="bbi-char-pills">
                   <span class="bbi-char-pill is-global">全局</span>
-                  <span v-if="charTagBaseNames.has(entry.name)" class="bbi-char-pill is-override" title="本聊天有同名角色,当前聊天以本聊天的为准">
+                  <span v-if="charTagBaseNames.has(row.entry.name)" class="bbi-char-pill is-override" title="本聊天有同名角色,当前聊天以本聊天的为准">
                     本聊天已覆盖
                   </span>
                 </span>
               </span>
-              <span v-if="chipsOf(entry).length" class="bbi-char-chips">
-                <span v-for="chip in chipsOf(entry)" :key="chip.label" class="bbi-chip" :title="chip.label">
+              <span v-if="chipsOf(row.entry).length" class="bbi-char-chips">
+                <span v-for="chip in chipsOf(row.entry)" :key="chip.label" class="bbi-chip" :title="chip.label">
                   {{ chip.value }}
                 </span>
               </span>
-              <span v-else class="bbi-char-raw">{{ entry.raw }}</span>
+              <span v-else class="bbi-char-raw">{{ row.entry.raw }}</span>
             </button>
+            <div class="bbi-char-portrait-bar" :class="{ 'is-stale': row.portrait.stale }">
+              <span class="bbi-char-portrait-thumb" :class="{ 'is-empty': !row.portrait.selected?.thumb }">
+                <img
+                  v-if="row.portrait.selected?.thumb"
+                  :src="row.portrait.selected?.thumb"
+                  :alt="`${row.entry.name} 的人设图`"
+                  loading="lazy"
+                />
+                <Icon v-else name="characters" :size="16" />
+              </span>
+              <span
+                v-if="row.portrait.stale"
+                class="bbi-char-pill is-stale"
+                title="角色的固定外貌已变化,这张人设图不再代表当前形象"
+              >
+                人设图已过期
+              </span>
+              <span v-else class="bbi-char-portrait-state">
+                {{ row.portrait.selected ? '人设图已生效' : '未设人设图' }}
+              </span>
+              <button
+                class="bbi-btn bbi-btn-sm bbi-char-portrait-btn"
+                type="button"
+                title="生成/更换该角色的人设图(选定的图会作为角色 vibe 参与后续配图)"
+                @click="openPortrait(row.entry.name, 'global')"
+              >
+                <Icon name="palette" :size="13" /> 人设图
+              </button>
+            </div>
           </li>
           </ul>
           <p v-else class="bbi-char-empty">
@@ -413,36 +610,65 @@ function sourceLabel(entry: CharTagEntry): string {
             仅当前聊天生效:柏宝书角色自动建档,AI 随剧情报告永久变化;可查看历史并回滚。
           </p>
           <ul v-if="chatEntries.length" class="bbi-char-grid">
-          <li v-for="entry in chatEntries" :key="entry.name" class="bbi-char-card">
-            <button class="bbi-char-card-btn" type="button" @click="openEntry(entry, 'chat')">
+          <li v-for="row in chatRows" :key="row.entry.name" class="bbi-char-card">
+            <button class="bbi-char-card-btn" type="button" @click="openEntry(row.entry, 'chat')">
               <span class="bbi-char-card-head">
-                <span class="bbi-char-name">{{ entry.name }}</span>
+                <span class="bbi-char-name">{{ row.entry.name }}</span>
                 <span class="bbi-char-pills">
                   <span
                     class="bbi-char-pill"
-                    :class="{ 'is-book': entry.source === 'book', 'is-ai': entry.source === 'ai' }"
+                    :class="{ 'is-book': row.entry.source === 'book', 'is-ai': row.entry.source === 'ai' }"
                   >
-                    {{ sourceLabel(entry) }}
+                    {{ sourceLabel(row.entry) }}
                   </span>
-                  <span v-if="globalNameSet.has(entry.name)" class="bbi-char-pill is-override" title="与全局库同名,当前聊天以本条为准">
+                  <span v-if="globalNameSet.has(row.entry.name)" class="bbi-char-pill is-override" title="与全局库同名,当前聊天以本条为准">
                     覆盖全局
                   </span>
                   <span
-                    v-if="entry.history.length"
+                    v-if="row.entry.history.length"
                     class="bbi-char-history-badge"
-                    :title="`${entry.history.length} 条变更记录,点卡片查看`"
+                    :title="`${row.entry.history.length} 条变更记录,点卡片查看`"
                   >
-                    <Icon name="history" />{{ entry.history.length }}
+                    <Icon name="history" />{{ row.entry.history.length }}
                   </span>
                 </span>
               </span>
-              <span v-if="chipsOf(entry).length" class="bbi-char-chips">
-                <span v-for="chip in chipsOf(entry)" :key="chip.label" class="bbi-chip" :title="chip.label">
+              <span v-if="chipsOf(row.entry).length" class="bbi-char-chips">
+                <span v-for="chip in chipsOf(row.entry)" :key="chip.label" class="bbi-chip" :title="chip.label">
                   {{ chip.value }}
                 </span>
               </span>
-              <span v-else class="bbi-char-raw">{{ entry.raw }}</span>
+              <span v-else class="bbi-char-raw">{{ row.entry.raw }}</span>
             </button>
+            <div class="bbi-char-portrait-bar" :class="{ 'is-stale': row.portrait.stale }">
+              <span class="bbi-char-portrait-thumb" :class="{ 'is-empty': !row.portrait.selected?.thumb }">
+                <img
+                  v-if="row.portrait.selected?.thumb"
+                  :src="row.portrait.selected?.thumb"
+                  :alt="`${row.entry.name} 的人设图`"
+                  loading="lazy"
+                />
+                <Icon v-else name="characters" :size="16" />
+              </span>
+              <span
+                v-if="row.portrait.stale"
+                class="bbi-char-pill is-stale"
+                title="角色的固定外貌已变化,这张人设图不再代表当前形象"
+              >
+                人设图已过期
+              </span>
+              <span v-else class="bbi-char-portrait-state">
+                {{ row.portrait.selected ? '人设图已生效' : '未设人设图' }}
+              </span>
+              <button
+                class="bbi-btn bbi-btn-sm bbi-char-portrait-btn"
+                type="button"
+                title="生成/更换该角色的人设图(选定的图会作为角色 vibe 参与后续配图)"
+                @click="openPortrait(row.entry.name, 'chat')"
+              >
+                <Icon name="palette" :size="13" /> 人设图
+              </button>
+            </div>
           </li>
           </ul>
           <p v-else class="bbi-char-empty">
@@ -572,6 +798,22 @@ function sourceLabel(entry: CharTagEntry): string {
           </ul>
         </div>
 
+        <!-- 人设图:已设置且已过期时给一键重生入口(未设置走卡片上的「人设图」按钮即可) -->
+        <div v-if="editingPortraitStale" class="bbi-char-portrait-stale">
+          <span class="bbi-char-pill is-stale">人设图已过期</span>
+          <span class="bbi-field-hint bbi-char-portrait-stale-hint">
+            固定外貌已变化,旧人设图不再代表当前形象,后续配图不会再参考它。
+          </span>
+          <button
+            class="bbi-btn bbi-btn-sm"
+            type="button"
+            title="按当前外貌重新生成候选并选一张"
+            @click="openPortraitForEditing"
+          >
+            <Icon name="palette" :size="13" /> 重新生成人设图
+          </button>
+        </div>
+
         <footer class="bbi-modal-foot">
           <button v-if="editingName" class="bbi-btn bbi-btn-danger" type="button" @click="askRemove">
             <Icon name="trash" /> 删除
@@ -649,6 +891,19 @@ function sourceLabel(entry: CharTagEntry): string {
         建档记录的回滚会删除整个条目。
       </template>
     </ConfirmDialog>
+
+    <!-- ===== 人设图选图弹窗 =====
+         内容与运行态都在 PortraitModal / portraitModalState 里,这里只负责选角色与传参。
+         放在页面最末:从角色编辑弹窗里打开时它后挂载,同 z-index 下压在编辑弹窗之上。 -->
+    <PortraitModal
+      :open="!!portraitTargetState"
+      :name="portraitTargetState?.name ?? ''"
+      :appearance-tag="portraitTargetState?.appearanceTag ?? ''"
+      :variants="portraitTargetState?.variants ?? []"
+      :selected="portraitTargetState?.selected ?? null"
+      @committed="onPortraitCommitted"
+      @close="closePortrait"
+    />
   </section>
 </template>
 
@@ -769,30 +1024,41 @@ function sourceLabel(entry: CharTagEntry): string {
 }
 .bbi-char-card {
   min-width: 0;
-}
-.bbi-char-card-btn {
-  width: 100%;
-  height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px 14px;
   border: 1px solid var(--bbi-line);
   border-radius: var(--bbi-radius);
   background: var(--bbi-surface);
-  color: var(--bbi-ink);
-  font-family: var(--bbi-font-sans);
-  cursor: pointer;
-  text-align: left;
+  overflow: hidden;
   transition:
     border-color var(--bbi-dur) var(--bbi-ease),
     box-shadow var(--bbi-dur) var(--bbi-ease),
     transform var(--bbi-dur) var(--bbi-ease);
 }
-.bbi-char-card-btn:hover {
+.bbi-char-card:hover {
   border-color: var(--bbi-accent);
   box-shadow: 0 8px 20px -12px var(--bbi-overlay);
   transform: translateY(-1px);
+}
+/* 卡片主体仍是按钮(点开编辑);外框交给 .bbi-char-card,人设图条才能并排在框内 */
+.bbi-char-card-btn {
+  width: 100%;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--bbi-ink);
+  font-family: var(--bbi-font-sans);
+  cursor: pointer;
+  text-align: left;
+}
+.bbi-char-card-btn:focus-visible {
+  outline: 2px solid var(--bbi-accent);
+  outline-offset: -2px;
 }
 .bbi-char-card-head {
   display: flex;
@@ -811,6 +1077,8 @@ function sourceLabel(entry: CharTagEntry): string {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -843,6 +1111,84 @@ function sourceLabel(entry: CharTagEntry): string {
   color: var(--bbi-warning);
   background: var(--bbi-warning-soft);
   border-color: transparent;
+}
+/* 人设图过期:与「覆盖全局」同为警示语义 —— 都表示当前展示的不再是最终事实 */
+.bbi-char-pill.is-stale {
+  color: var(--bbi-warning);
+  background: var(--bbi-warning-soft);
+  border-color: transparent;
+}
+
+/* —— 卡片底部人设图条:缩略图 + 状态/过期药丸 + 按钮 —— */
+.bbi-char-portrait-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--bbi-line);
+  background: var(--bbi-surface-2);
+}
+/* 过期态整条转警示底色:缩略图还是旧形象,别让用户以为它仍生效 */
+.bbi-char-portrait-bar.is-stale {
+  background: var(--bbi-warning-soft);
+  border-top-color: var(--bbi-warning);
+}
+.bbi-char-portrait-thumb {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--bbi-radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--bbi-line);
+  background: var(--bbi-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.bbi-char-portrait-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.bbi-char-portrait-thumb.is-empty {
+  color: var(--bbi-ink-muted);
+  opacity: 0.75;
+  border-style: dashed;
+}
+.bbi-char-portrait-state {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--bbi-ink-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bbi-char-portrait-bar .bbi-char-pill {
+  /* 过期时没有可伸缩的状态文字,药丸自己顶开,按钮才留在右侧 */
+  margin-right: auto;
+}
+.bbi-char-portrait-btn {
+  flex: 0 0 auto;
+}
+
+/* —— 编辑弹窗里的人设图过期提示:整行,按钮靠右 —— */
+.bbi-char-portrait-stale {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border: 1px solid var(--bbi-warning);
+  border-radius: var(--bbi-radius-sm);
+  background: var(--bbi-warning-soft);
+}
+.bbi-char-portrait-stale-hint {
+  flex: 1 1 180px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--bbi-ink-soft);
 }
 
 /* —— 字段 chips:两行封顶,超出裁切 —— */
