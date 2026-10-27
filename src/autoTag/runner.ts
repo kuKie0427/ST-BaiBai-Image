@@ -10,6 +10,7 @@ import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/g
 import { autoTagProfile, buildAutoTagMessages } from '@/autoTag/prompt';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
 import { buildSlotTaskNote } from '@/autoTag/slotPlan';
+import { collectPortraitSeeds, setVariants } from '@/state/charPortraits';
 import {
   BBI_CHAR_EXTRA_KEY,
   CHAR_TAG_FIELDS,
@@ -549,6 +550,10 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         return;
       }
       recomputeCharTags();
+      // 只认已提交的建档 ops:set 变更不重算变体,AI 没给 portraits 的角色保留旧变体。
+      for (const seed of collectPortraitSeeds(floorOps, plan.changes)) {
+        setVariants(seed.name, seed.variants);
+      }
       if (rebaseNote) console.info(`[柏宝绘] 第 ${floor} 楼 tag 位置重定位:${rebaseNote}`);
       if (plan.images.length) {
         toastr.success(`已在第 ${floor} 楼插入 ${plan.images.length} 个生图 tag`, '柏宝绘');
