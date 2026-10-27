@@ -4,6 +4,8 @@ import { bindTagActionButtons } from '@/floor/actionButton';
 import { bindFloorHydration } from '@/floor/hydrate';
 import { injectMenuButton } from '@/menu';
 import { registerPublicInterface } from '@/public/register';
+import { bindCharPortraitSync } from '@/state/charPortraits';
+import { initGlobalCharPortraits } from '@/state/charPortraitsGlobal';
 import { bindCharTagSync } from '@/state/charTags';
 import { initGlobalCharTags } from '@/state/globalCharTags';
 import { hydrateSettings } from '@/state/settings';
@@ -98,7 +100,9 @@ async function hydrateWhenReady(attempt = 0) {
       await hydrateSettings();
       // 全局库必须在 bindCharTagSync 之前初始化:首次重算就要把全局条目合进派生库
       initGlobalCharTags();
+      initGlobalCharPortraits();
       bindCharTagSync();
+      bindCharPortraitSync();
       ensureImageTagRegexRegistered();
       bindAutoTagging();
       bindFloorHydration();
