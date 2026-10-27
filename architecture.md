@@ -42,8 +42,11 @@ src/
 │   ├── history.ts     # 请求历史(LLM 推理+生图)模块级内存 store,刻意不持久化
 │   ├── charTags.ts    # 角色固定外貌库:本聊天基线(chatMetadata)+ AI 楼层增量(消息 extra),
 │   │                  # 全局库经 setGlobalCharTagSource 注入合并;锁定名拦截 AI changes
-│   └── globalCharTags.ts # 全局角色库(extensionSettings,跨聊天/跨设备):仅手动维护的冻结模板,
-│                      # AI 永不可写;提升为全局/复制回本聊天两条迁移路径
+│   ├── globalCharTags.ts # 全局角色库(extensionSettings,跨聊天/跨设备):仅手动维护的冻结模板,
+│   │                  # AI 永不可写;提升为全局/复制回本聊天两条迁移路径
+│   ├── charPortraits.ts # ★ 角色人设图库(chatMetadata):3 条提示词变体 + 选中项(含 vibe 引用),
+│   │                  # 过期是派生量(buildEntryTag 比对),collectPortraitSeeds 供 runner 落变体
+│   └── charPortraitsGlobal.ts # 全局人设图库(extensionSettings,协议同全局角色库)+ 提升/复制/清理
 ├── api/
 │   └── client.ts      # LLM 请求:副 API 走 ST 服务端代理 / 跟随主 API 走 generateRaw
 ├── autoTag/           # ★ 链路 A:自动生 tag(独立 LLM 请求 → 协议校验 → 注入正文)
@@ -69,6 +72,8 @@ src/
 │   ├── chatu8Vibe.ts  # 从智绘姬(st-chatu8)只读导入 vibe / 提示词预设
 │   │                  # (collect/detect/import 纯函数三件套,绝不写回智绘姬)
 │   ├── vibeGroups.ts  # Vibe 分组纯逻辑(装箱 key/归拢/搜索/启用集合判定)
+│   ├── charVibeInject.ts # 角色人设 vibe 解析:出场角色 → 未过期选中人设 → 完整 NaiVibe(封顶 3)
+│   ├── charPortraitVibe.ts # 人设图候选生成(串行)+ 选定落库(缩略图 + 闸门内 vibe 编码)
 │   └── size.ts        # 画幅方向归一 / 尺寸解析 / 按方向取配置 / 画幅锁(effectiveOrientation)
 │                      # (刻意不 import settings)
 ├── generate.ts        # ★ 一次出图的共用中段:NAI 闸门 → 按后端分派 → 拿到图。
@@ -106,7 +111,10 @@ src/
 ├── pages/             # 主窗口的分页(注册表在 pages/registry.ts)
 │   ├── backend/index.vue      # 「渠道」页:页签(webui 已隐藏)+ 各后端面板
 │   │   └── panels/            # ComfyUIPanel / NaiPanel / WebUIPanel(隐藏,代码保留)/ NaiArtistManager
-│   ├── characters/index.vue   # 「角色管理」页:全局/本聊天两区卡片式外貌库 CRUD + 历史回滚
+│   ├── characters/index.vue   # 「角色管理」页:全局/本聊天两区卡片式外貌库 CRUD + 历史回滚;
+│   │   │                      # 每张卡带人设图缩略图 / 「人设图」按钮 / 「人设图已过期」药丸
+│   │   ├── PortraitModal.vue  # 人设图选图弹窗:3 张候选并排,逐槽重绘/编辑/AI 重写/取消
+│   │   └── portraitModalState.ts # 弹窗运行态模块级 store(关窗不中断、重开续上;切聊天全清)
 │   ├── gallery/index.vue      # 「图库」页:按角色名分组浏览 user/images/柏宝绘_<角色名>/(放大+看提示词+另存;多选删除**只删文件不碰聊天记录**,分组体积逐张 HEAD 量但 ⚠ 已暂时禁用)
 │   ├── history/index.vue      # 「请求历史」页:调试辅助(LLM 提示词/响应/生图元信息)
 │   └── settings/index.vue     # 「设置」页:渠道管理/自动 tag/提示词编辑/界面偏好(最大页)
@@ -609,6 +617,79 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
 - `vibeStore.ts`:Vibe 原图/编码正文与缩略图分文件存 ST `user/files`，文件存储不可用时回退本机 IndexedDB。
   `extensionSettings['baibai_image']` 只留路径、模型键、指纹等小型索引，禁止再放 Base64。
 
+**角色人设图(角色管理页 + charPortraits / charPortraitsGlobal / charVibeInject / charPortraitVibe)**:
+解决的问题是**外貌漂移**——档案里的 tag 只是文字描述,同一角色每张图的脸/发/衣着都会重画一遍。
+人设图把「这张脸」编码成一条 NAI vibe 随图叠加,是**参考图**而非另写一段提示词。全流程分四段,
+每段都能独立失败且不挡正图(人设 vibe 是锦上添花)。
+
+- **变体从建档那趟车顺带产出(零额外 LLM 成本)**:`field:"new"` 的 change 多带
+  `portraits: [{extra, nl} ×3]`(protocol.ts 的 `sanitizePortraits`,宽容:单条坏只丢这条、
+  超 3 条截断、子标签命中作废该条、整键缺失 = undefined,prompt.ts 的 `newCharacterRule` 要求
+  「恰好 3 条,只差服装/构图/表情/背景」,**nl 只在「生成自然语言」开着时才要**)。
+  - **外观靠构造保证逐字一致**:模型**只写变体专属部分**,最终提示词由
+    `composePortraitPrompt(appearanceTag, variant)` 拼成 `外观 tag + ', ' + extra`。
+    模型若把 hair/eyes 也写进 extra,同一套外貌在提示词里出现两遍、措辞稍异就互相打架,故
+    提示词里逐字禁止,`portraitModalState.ts` 的 `sanitizePortraitExtra` 在 AI 重写侧再删一遍
+    与外貌逐字重复的片段。
+  - ⚠ `portraits[].extra` 与档案 `fields.extra`(标志特征)**同名不同义**,提示词里专门划了这层歧义。
+- **存储(两层,与角色库同构)**:本聊天在 `chatMetadata['baibai_image_char_portraits']`
+  (`{version:1, entries: CharPortraitEntry[]}`,`saveMetadataDebounced` + `CHAT_CHANGED` 重水合);
+  全局在 `extensionSettings['baibai_image_char_portraits_global']`(revision + 指纹 + 窗口事件广播,
+  协议与全局角色库一致)。条目 = `{name, variants, selected}`,选中项 =
+  `{prompt, seed, anchorTag, thumb, vibe:{dataPath, thumbnailPath, modelKeys, fingerprint}}`。
+  归一化全程宽容,`dataPath` 缺失的选中项直接作废(没有它加载不到 vibe 正文,存着也是白存)。
+  依赖方向**单向**:`charPortraitsGlobal → charPortraits`;反向只经
+  `setGlobalCharPortraitSource` 注入只读 getter(与 charTags ↔ globalCharTags 同构,避免模块环)。
+  查找走 `resolveCharPortrait`(本聊天优先、全局补空缺),与 `mergeCharTagSeed` 同语义。
+- **落库时机**:`runner.ts` 在写回成功(`result === 'saved'`、非单槽重写)后
+  `collectPortraitSeeds(floorOps, plan.changes)` → `setVariants`。**只认 `kind==='new'`**:
+  变体是建档时的一次性产物,`set` 变更不重算,AI 这轮没给变体就保留旧变体;
+  也**不进楼层 delta**(`normalizeAutoOp` 会剥掉未知字段,且变体不是重放相关的事实)。
+  `setVariants` 只换变体、保留已有选中项 —— 重跑建档不该让用户选好的图掉下来。
+- **过期是派生量,不写库**:`isPortraitStale(entry, currentAppearanceTag)` =
+  `selected.anchorTag !== 当前档的 buildEntryTag(...)`。`anchorTag` 是选定当时的档快照,
+  所以 AI `set`、手动改档、历史回滚都会自动翻牌,`charTags.ts` 里零钩子、零循环依赖。
+  卡片与弹窗都实时算,不存本地副本。
+- **注入路径(NAI 专用)**:`generateImage`(→ `charVibeInject.resolveCharVibes`)按
+  **提示词里 characters 的顺序**逐个查人设 → 档案还在且未过期 → 指纹去重 → 封顶
+  `CHAR_VIBE_CAP = 3` → 组装**完整 `NaiVibe`**(`id: charv_<名字>`、`group: '角色'`、
+  `strength: clampVibeStrength(settings.nai.charVibeStrength)`);正文由
+  `generateNaiImage` 统一读(它是 vibe 正文的唯一读取点),以 `extraVibes` 交给 `applyVibes`,
+  **接在启用的风格 vibe 之后**,同吃一套跳过/归一化/记录逻辑(`GenerationMeta.vibes` 里
+  带 `group: '角色'`,图库与卡片的溯源文本据此显示)。任一环不满足就**静默跳过该角色**,
+  不降级不报错。⚠ `applyVibes` 原有两个早退守卫(无 active / 模型不支持)必须把 extraVibes
+  算进总数:「一条风格 vibe 都没启用」是极常见配置,按 `active` 判空会让角色 vibe 凭空消失
+  (nai.test.ts 锁了 extra-only 用例)。
+   ⚠ **注入查的是合并视图**(`resolveCharVibes` 调 `resolveCharPortrait`:本聊天库优先,
+   查不到再回落全局库):角色被「提升为全局」后聊天副本已删,但全局库条目照样参与注入,
+   与角色页全局卡片的展示口径一致(generate.test.ts 锁了全局回落用例)。
+- **选定与编码(`charPortraitVibe.ts`)**:`generatePortraitCandidates` 逐条**串行**调
+  `generateImage`(闸门/限流共用;一次并排 3 张就是 3 条并发砸账号),失败槽位跳过不占位,
+  取消(AbortError)整体抛出。`commitPortrait` = `makeJpegThumbnail`(96,失败回空串)→
+  `encodeVibeImage` **包在 `acquireNaiSlot()` 里、release 放 finally**(它也是真实 NAI 请求,
+  口径与 NaiPanel 的 `encodeVibeGated` 逐字一致)→ `saveVibeFiles` → `setSelected`
+  (带 `anchorTag = 选定当时的 buildEntryTag`)。失败只 toastr 并返回 null,不 rethrow ——
+  调用方的反应是「留着弹窗让用户重试」。
+- **UI(`pages/characters/`)**:卡片常驻人设图缩略图 + 「人设图」按钮 + 状态行
+  (未设人设图 / 人设图已生效 / **人设图已过期** 药丸);编辑弹窗在已设置且已过期时给
+  「重新生成人设图」(草稿有未保存的外貌改动会先拦一下,否则按旧档锚定、保存后立刻又过期)。
+  `PortraitModal.vue` 三张候选并排,逐槽 重绘 / 编辑提示词(只改 extra,外观只读)/
+  AI 重写(`buildPortraitRewriteMessages` 单发,外貌钉死在消息里)/ 取消;
+  **在点「使用这张」之前什么都不落库**,候选只活在 `portraitModalState.ts` 的模块级会话里
+  (关窗不中断、重开能看到进度、逐槽 AbortController、每角色一条串行链,切聊天全清)。
+  没有变体时(旧聊天/协议漏字段/手动建档)用内置三拍兜底,按钮永远可点。
+  `portraitBackendGate` 在非 NAI 后端禁用并给出原因文案。
+- **生命周期**:提升为全局 = `promotePortraitToGlobal`(整条搬进全局库再删本聊天副本,
+  vibe 文件不搬不删、两边引用同一份);反向 `copyGlobalPortraitToChat`;
+  删角色 → `cleanupPortrait(name, {global})`,删条目必定成功、**vibe 文件尽力删**
+  (还有别的库条目引用同一个 `dataPath` 就保留,避免删掉别人正在用的)。
+  ⚠ **已知风险(接受)**:①**删聊天会连 `chatMetadata` 整份删**,本聊天的人设图条目随之消失,
+  但 `user/files` 里的 vibe 正文与缩略图不跟着删 —— 条目没了就再也查不到那个 `dataPath`,
+  只能用户手动清理服务器文件(全局条目在 extensionSettings,不受影响);
+  ②**换模型**:编码按 `vibeModelKey` 分组,新模型缺编码时走既有的「缺编码 → 跳过 + toastr」路径,
+  不会炸生成,但该角色的人设 vibe 那张图就用不上了(需要重选一次人设图重新编码);
+  ③**v1 只支持 NAI**:ComfyUI 静默跳过(不读 characters、不注入),弹窗侧直接禁用并提示。
+
 ## 7. 状态与持久化
 
 - **settings(全局,跨设备)**:`state/settings.ts`。import 阶段以默认值建 reactive;
@@ -833,6 +914,14 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
     「镜头外存在合理」的旁注来自我说服。规范示例也一并改掉:旧例 Base 写 `2girls` 却只给
     一条 Character Prompt,恰好演示了「另一个人没有落位」这一反面行为。
     ⚠ 这是纯提示词改动,`prompt.test.ts` 锁的是**措辞**不是行为,能否真的修好只能实跑验证。
+- **charPortraits(角色人设图,与角色库平行但独立的两层真源)**:本聊天存
+  `chatMetadata['baibai_image_char_portraits']`,全局存
+  `extensionSettings['baibai_image_char_portraits_global']`(协议同全局角色库:revision + 指纹 +
+  广播事件)。**与角色库的关系是单向依赖**:本模块可 import charTags 的类型/工具,
+  charTags 绝不 import 它;全局侧反向也只经 `setGlobalCharPortraitSource` 注入只读 getter。
+  过期不落库(`isPortraitStale` 派生)、变体只进 chatMetadata 不进消息 extra
+  (楼层 delta 的重放协议 `normalizeAutoOp` 会剥掉未知字段)。存储布局、注入路径、
+  生命周期与已知风险见 §6「角色人设图」段。
 
 ## 8. 贯穿全项目的约定
 
@@ -923,6 +1012,7 @@ API 对象 `Object.freeze`,一个插件改不动下一个插件拿到的东西�
 | 世界书/角色卡/persona 装配 | src/autoTag/context.ts |
 | 柏宝书状态读取 | src/autoTag/bookMemory.ts |
 | 角色库 v3(基线+楼层增量/changes ops/@占位符兜底/历史回滚) | src/autoTag/charAnchors.ts + src/state/charTags.ts + src/autoTag/runner.ts |
+| 角色人设图(变体产出/选中/过期/注入/全局提升) | src/autoTag/protocol.ts + prompt.ts(变体协议与要求)+ src/state/charPortraits.ts / charPortraitsGlobal.ts(存储与生命周期)+ src/backends/charVibeInject.ts / charPortraitVibe.ts(解析注入 / 候选与编码)+ src/pages/characters/(UI) |
 | Vibe 分组 / 搜索 / 启用集合判定 | src/backends/vibeGroups.ts(纯逻辑)+ NaiPanel.vue(交互) |
 | 副 API 请求(代理/SSE/超时/测试) | src/api/client.ts |
 | 思考强度(渠道弹窗 + custom 源请求体) | src/state/settings.ts 的 `ApiChannel.reasoningEffort` + api/client.ts 的 `buildRequestBody`(UI 在 settings/index.vue) |
