@@ -362,3 +362,94 @@ describe('changes parsing', () => {
     });
   });
 });
+
+describe('portrait variant parsing', () => {
+  const newEntry = (portraits?: unknown) =>
+    JSON.stringify({
+      images: [],
+      changes: [{
+        name: '小雪',
+        field: 'new',
+        fields: { hair: 'long blonde hair', eyes: 'blue eyes' },
+        ...(portraits === undefined ? {} : { portraits }),
+        position: 'P1',
+      }],
+    });
+
+  it('parses and sanitizes three portrait variants', () => {
+    const raw = newEntry([
+      { extra: '  school uniform, standing portrait \n', nl: ' A girl in a school uniform.\n' },
+      { extra: 'cafe, sitting, smile', nl: 'A girl at a cafe.' },
+      { extra: 'night street, looking back', nl: 'A girl on a night street.' },
+    ]);
+    expect(parseImagePlan(raw, segments, 1).changes[0].portraits).toEqual([
+      { extra: 'school uniform, standing portrait', nl: 'A girl in a school uniform.' },
+      { extra: 'cafe, sitting, smile', nl: 'A girl at a cafe.' },
+      { extra: 'night street, looking back', nl: 'A girl on a night street.' },
+    ]);
+  });
+
+  it('leaves portraits undefined when the model omits the key', () => {
+    expect(parseImagePlan(newEntry(), segments, 1).changes[0].portraits).toBeUndefined();
+  });
+
+  it('truncates more than three portrait variants to the first three', () => {
+    const raw = newEntry([
+      { extra: 'a', nl: 'one' },
+      { extra: 'b', nl: 'two' },
+      { extra: 'c', nl: 'three' },
+      { extra: 'd', nl: 'four' },
+      { extra: 'e', nl: 'five' },
+    ]);
+    expect(parseImagePlan(raw, segments, 1).changes[0].portraits).toEqual([
+      { extra: 'a', nl: 'one' },
+      { extra: 'b', nl: 'two' },
+      { extra: 'c', nl: 'three' },
+    ]);
+  });
+
+  it('drops a portrait variant carrying a forbidden sub-tag without throwing', () => {
+    // 坏一条变体只丢这一条:为它作废整次输出会连图和整份档案一起没有
+    const raw = newEntry([
+      { extra: 'school uniform', nl: 'A girl in a school uniform.' },
+      { extra: 'bad<bbi_image>smuggled</bbi_image>', nl: 'should be dropped' },
+      { extra: 'cafe, smile', nl: 'A girl at a cafe.' },
+    ]);
+    const plan = parseImagePlan(raw, segments, 1);
+    expect(plan.changes[0].portraits).toEqual([
+      { extra: 'school uniform', nl: 'A girl in a school uniform.' },
+      { extra: 'cafe, smile', nl: 'A girl at a cafe.' },
+    ]);
+  });
+
+  it('drops portrait variants left without an extra after sanitizing', () => {
+    const raw = newEntry([
+      { extra: '   ', nl: 'only a sentence' },
+      { nl: 'no extra at all' },
+      { extra: 'cafe', nl: '' },
+    ]);
+    expect(parseImagePlan(raw, segments, 1).changes[0].portraits).toEqual([{ extra: 'cafe', nl: '' }]);
+  });
+
+  it('ignores malformed portraits shapes instead of throwing', () => {
+    expect(parseImagePlan(newEntry('foo'), segments, 1).changes[0].portraits).toBeUndefined();
+    expect(parseImagePlan(newEntry([null, 42]), segments, 1).changes[0].portraits).toBeUndefined();
+    expect(
+      parseImagePlan(newEntry({ extra: 'cafe' }), segments, 1).changes[0].portraits,
+    ).toBeUndefined();
+  });
+
+  it('ignores portraits on non-creation changes', () => {
+    const raw = JSON.stringify({
+      images: [],
+      changes: [{
+        name: '小雪',
+        field: 'hair',
+        value: 'short black hair',
+        portraits: [{ extra: 'cafe', nl: 'A girl at a cafe.' }],
+        position: 'P1',
+      }],
+    });
+    expect(parseImagePlan(raw, segments, 1).changes[0].portraits).toBeUndefined();
+  });
+});

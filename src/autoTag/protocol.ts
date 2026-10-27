@@ -29,6 +29,15 @@ export interface ImageInsertion {
   size: Orientation;
 }
 
+/**
+ * 建档时随附的人设图提示词变体:外观 tag 由插件统一拼在前(保证三张一致),
+ * 这里只放服装/构图/表情/背景,两者拼起来才是完整提示词。
+ */
+export interface PortraitVariant {
+  extra: string;
+  nl: string;
+}
+
 export interface ImagePlan {
   images: ImageInsertion[];
   /** AI 报告的角色库变更(建档/字段更新);调用方负责落库。 */
@@ -51,6 +60,8 @@ export interface CharChange {
   position: string;
   /** position 对应的原始物理行(0-based,仅插件内部使用)。 */
   sourceLine: number;
+  /** 建档(new)时可附带的人设图提示词变体,最多 3 条;缺省/畸形容忍为 undefined。 */
+  portraits?: PortraitVariant[];
 }
 
 const HISTORY_FIELDS: ReadonlySet<string> = new Set([
@@ -254,6 +265,28 @@ function parseNewFields(raw: Record<string, unknown>): string | null {
   return JSON.stringify(fields);
 }
 
+const PORTRAIT_VARIANT_LIMIT = 3;
+
+/** 单条变体文本沿用 sanitizeContent 的 trim/换行口径,但禁用子标签只作废该条而不抛错。 */
+function sanitizePortraitText(value: unknown): string {
+  const text = typeof value === 'string' ? value.trim().replace(/[\r\n]+/g, ' ') : '';
+  return text && FORBIDDEN_SUBTAG.test(text) ? '' : text;
+}
+
+function sanitizePortraits(value: unknown): PortraitVariant[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const portraits: PortraitVariant[] = [];
+  for (const raw of value) {
+    if (portraits.length >= PORTRAIT_VARIANT_LIMIT) break;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const item = raw as Record<string, unknown>;
+    const extra = sanitizePortraitText(item.extra);
+    if (!extra) continue;
+    portraits.push({ extra, nl: sanitizePortraitText(item.nl) });
+  }
+  return portraits.length ? portraits : undefined;
+}
+
 function parseChanges(raw: unknown, positions: Map<string, number>): CharChange[] {
   if (!Array.isArray(raw)) return [];
   const out: CharChange[] = [];
@@ -269,6 +302,7 @@ function parseChanges(raw: unknown, positions: Map<string, number>): CharChange[
     if (!parsedPosition && field !== 'new') continue;
     const { position, sourceLine } = parsedPosition ?? firstPosition(positions);
     let value = typeof o.value === 'string' ? o.value.trim() : '';
+    let portraits: PortraitVariant[] | undefined;
     const fields =
       o.fields && typeof o.fields === 'object' && !Array.isArray(o.fields)
         ? (o.fields as Record<string, unknown>)
@@ -277,11 +311,12 @@ function parseChanges(raw: unknown, positions: Map<string, number>): CharChange[
       const parsedFields = fields ? parseNewFields(fields) : null;
       if (!parsedFields) continue;
       value = parsedFields;
+      portraits = sanitizePortraits(o.portraits);
     }
     const nl = typeof o.nl === 'string' ? o.nl.trim() : '';
     const reason = typeof o.reason === 'string' ? o.reason.trim() : '';
     if (!value && !nl) continue;
-    out.push({ name, field, value, nl: nl || undefined, reason, position, sourceLine });
+    out.push({ name, field, value, nl: nl || undefined, reason, position, sourceLine, portraits });
   }
   return out;
 }
