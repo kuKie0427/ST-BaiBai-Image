@@ -1246,6 +1246,23 @@ async function removeVibe(vibe: NaiVibe) {
         </div>
         <p class="bbi-field-hint">Scale = 提示词相关性;Rescale = 相关性调整;种子 0 = 随机。</p>
 
+        <div class="be-row be-row--nums">
+          <div class="bbi-field">
+            <div class="bbi-field-head">
+              <span class="bbi-field-label">角色人设 vibe 强度</span>
+            </div>
+            <input
+              class="bbi-input"
+              type="number"
+              v-model.number="settings.nai.charVibeStrength"
+              min="0"
+              max="1"
+              step="0.05"
+            />
+          </div>
+        </div>
+        <p class="bbi-field-hint">出场角色选定人设图后,按此强度把角色 vibe 叠进画面(0–1,0.4–0.6 较稳)。</p>
+
         <label class="bbi-switch-row">
           <span class="bbi-field-label">Variety Boost(画面多样性,按尺寸自动计算)</span>
           <input v-model="settings.nai.varietyBoost" type="checkbox" class="bbi-checkbox" />

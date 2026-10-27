@@ -277,6 +277,12 @@ export interface NaiSettings extends BackendConn {
   /** 参考强度归一化:多个 vibe 强度总和超过 1 时按比例压回 1。 */
   normalizeRefStrength: boolean;
   /**
+   * 角色人设 vibe 的叠加强度(0–1,默认 0.5)。角色人设 vibe 由角色档案选定的人设图
+   * 派生,不进 vibes 库,故强度单独挂在渠道级:见 generate.ts 的注入逻辑与
+   * backends/nai.ts 的 extraVibes。
+   */
+  charVibeStrength: number;
+  /**
    * 同时出图数(1–4,默认 1)。NAI 的 generate-image 是阻塞式请求、服务端不排队,
    * 并发压过去容易吃 429,故由客户端闸门限流(floor/genQueue.ts)。
    * ComfyUI 无此设置:它有服务端队列,一次性全发即可。
@@ -1150,6 +1156,7 @@ function naiDefaults(): NaiSettings {
     seed: 0,
     varietyBoost: true,
     normalizeRefStrength: true,
+    charVibeStrength: 0.5,
     concurrency: 1,
     vibes: [],
     // 用户库为空:库里只有用户自己建的配方,官方推荐的那条是内置只读条目
@@ -1669,6 +1676,8 @@ function normalizeNai(raw: unknown, def: NaiSettings): NaiSettings {
     varietyBoost: typeof o.varietyBoost === 'boolean' ? o.varietyBoost : def.varietyBoost,
     normalizeRefStrength:
       typeof o.normalizeRefStrength === 'boolean' ? o.normalizeRefStrength : def.normalizeRefStrength,
+    // 角色人设 vibe 强度:非数字回落默认(不认 Number(null)===0 那套,见 clampNumber)
+    charVibeStrength: clampNumber(o.charVibeStrength, def.charVibeStrength, 0, 1),
     concurrency: Math.round(clampNumber(o.concurrency, def.concurrency, 1, 4)),
     vibes: Array.isArray(o.vibes)
       ? o.vibes.map((v, i) => normalizeVibe(v, i)).filter((v): v is NaiVibe => v !== null)
