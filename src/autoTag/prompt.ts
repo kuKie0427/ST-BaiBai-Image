@@ -235,7 +235,22 @@ export async function buildAutoTagMessages(
   if (nlOn && !naiCharPromptsOn) sampleImage.nl = sampleNl;
   if (negativeOn) sampleImage.negative = 'extra people, duplicate character';
   sampleImage.size = profile.lockedSize ?? 'portrait';
-  const outputShape = JSON.stringify({ images: [sampleImage], changes: [] });
+  // 建档示例要带 portraits:示例恒为 changes:[] 时,模型照抄示例的倾向会把变体一起省掉。
+  // 三条示例各代表一种拍法(全身立绘 / 日常场景 / 剧情氛围),且 extra 里一个外貌 tag 都没有。
+  const samplePortraits: { extra: string; nl: string }[] = [
+    { extra: 'white sailor dress, standing, full body', nl: 'A girl stands full body smiling in a classroom.' },
+    { extra: 'casual hoodie, sitting, cafe', nl: 'A girl sits in a cafe wearing a casual hoodie.' },
+    { extra: 'night street, upper body, looking back', nl: 'A girl looks back on a night street.' },
+  ];
+  const sampleNewCharacter: Record<string, unknown> = {
+    name: '小雪',
+    field: 'new',
+    fields: { sex: '1girl', hair: 'long black hair', eyes: 'blue eyes' },
+    position: 'P2',
+    reason: '首次出场建档',
+    portraits: samplePortraits.map(portrait => (nlOn ? portrait : { extra: portrait.extra })),
+  };
+  const outputShape = JSON.stringify({ images: [sampleImage], changes: [sampleNewCharacter] });
   // NAI 两种写法共用的尾段:角色块的取舍与 Base / 角色的分工不随自然语言开关变
   const naiCharacterRuleTail =
     'This includes visible characters who have no library profile: a one-off unnamed individual gets a Character Prompt too, keyed by the term the story uses for them. Anonymous crowds visible in the frame remain in Base. Character tag uses girl/boy without a numeric count and contains that character appearance, outfit, and action. Do not include quality tags, negative tags, or XML.';
@@ -278,6 +293,20 @@ export async function buildAutoTagMessages(
     : nlOn
       ? '\n   - NAI V5 profile requirement: every field:"new" change must include a non-empty nl containing a concise English natural-language description of the character fixed appearance. The name must be the character exact name from the card/lorebook/story — a Chinese name stays Chinese (小雪), never pinyin or translation. Fandom characters must also include their identity tag in fields.fandom, e.g. {"name":"冬海","field":"new","fields":{"sex":"1girl","hair":"long black hair","eyes":"blue eyes","fandom":"kasumi (blue archive)"},"nl":"A girl with long black hair and blue eyes.","position":"P2","reason":"first appearance"}; original characters omit fandom. If an existing library entry lacks fandom but the character is fandom, report a changes item with field:"fandom". Describe only fixed appearance: no current outfit, pose, or location — temporary states never enter the profile.'
       : '\n   - NAI profile requirement: the name must be the character exact name from the card/lorebook/story — a Chinese name stays Chinese (小雪), never pinyin or translation. Fandom characters must also include their identity tag in fields.fandom, e.g. {"name":"冬海","field":"new","fields":{"sex":"1girl","hair":"long black hair","eyes":"blue eyes","fandom":"kasumi (blue archive)"},"position":"P2","reason":"first appearance"}; original characters omit fandom. If an existing library entry lacks fandom but the character is fandom, report a changes item with field:"fandom".';
+  // 人设图变体:外观 tag 由插件在选中后按档案逐字拼在变体前面,所以协议只要
+  // 服装/构图/表情/背景这四项 —— 三条在这四项之外必须完全一致,才是同一套外貌的三种拍法。
+  // portraits[].extra 与档案 fields.extra(标志特征)同名不同义:不逐字划掉这层歧义,
+  // 模型会把标志特征抄进变体(外貌在提示词里出现两遍),或反过来把服装写进永久档案。
+  const portraitExample = nlOn
+    ? '{"portraits":[{"extra":"white sailor dress, standing, full body","nl":"A girl stands full body smiling in a classroom."},{"extra":"casual hoodie, sitting, cafe","nl":"A girl sits in a cafe wearing a casual hoodie."},{"extra":"night street, upper body, looking back","nl":"A girl looks back on a night street."}]}'
+    : '{"portraits":[{"extra":"white sailor dress, standing, full body"},{"extra":"casual hoodie, sitting, cafe"},{"extra":"night street, upper body, looking back"}]}';
+  const portraitNlRule = nlOn
+    ? '每条变体的 nl 是一句独立的英文，只描述这一张人设图的画面。'
+    : '本次输出是纯 tag 形态：变体只写 extra，不写 nl 键。';
+  const portraitsRule = `
+   - **每条 field:"new" 的 change 还必须顺带给出 3 条人设图变体**：${portraitExample}。恰好 3 条，不多不少。三条只许在**服装、构图、表情、背景**上不同，其余部分必须完全一致——这是同一套外貌的三种拍法，不是三个不同角色。三种拍法各占一种：站立全身肖像、日常场景肖像、剧情氛围镜头（如全身校服立绘 / 咖啡馆日常 / 夜色回望），不得三条都只是同一机位换个表情。${portraitNlRule}
+   - portraits[].extra 只写这一张人设图专属的服装、构图、表情、背景 danbooru 短 tag，**不得包含任何固定外貌 tag**：sex/hair/eyes/skin/body 以及 fandom 这些档案里已经定死的东西一个都不写——插件会把档案里的固定外貌逐字拼在 extra 之前，你在 extra 里再写一遍，同一套外貌就会在提示词里出现两遍，两处措辞稍有不一致就会互相打架，人设图当场跑偏。
+   - **portraits[].extra 与角色档案的 extra 字段无关**：fields.extra 是标志特征（疤、眼镜、纹身这类长期留在身上的东西，属于固定外貌），portraits[].extra 只表示这一张人设图的服装/构图/表情/背景。两者同名不同义——既不要把 fields.extra 的内容抄进变体，也不要把服装、构图之类写进 fields.extra。`;
   const newCharacterRule = `
    - **建档先于画图**：先通读目标正文，找出每个有名有姓、且【角色固定外貌库】里还没有的正式角色——只要角色卡、世界书、柏宝书或持续剧情为他给出了设定，或他是持续参与剧情的角色，首次出场就必须建档，不论他是否入选本次图片。判断依据是发给你的全部设定内容，由你自己通读判断。一次性无名路人不建。
    - **建档资格与入画资格是两回事**：不建档只表示他不进角色库，不表示他不能入画；已建档也不表示他必须入画。先按本图的主体和核心互动取景，再为镜头内的人写外貌，不按档案状态决定取舍。无名角色若是核心互动的参与者，照常入画，不得仅因缺档案放弃画面、改选瞬间或裁掉他；仅仅在场不构成入画理由，无关在场者可以留在镜头外。
@@ -286,7 +315,7 @@ export async function buildAutoTagMessages(
    - 建档字段只放**长期不变的身体特征**：sex/hair/eyes/skin/body/extra 填性别、发色发型、瞳色、肤色、体型、标志特征；outfit 只填该角色**固定不换的招牌着装**；判定为同人角色的，fields 里必须写 fandom（模型可识别的英文 Danbooru 身份 tag，格式 character name (copyright name)），原创角色不写 fandom。动作、姿势、所在场景、临时状态（lying on carpet、standing、sitting、unzipped、湿身、伤势等）一律不得写进任何字段——档案会在他之后每一张图里被照抄，把姿势写进去会让他在所有画面里都保持那个姿势。
    - 建档取值优先级：目标正文明确的当前外貌 > 柏宝书当前角色状态 > 角色卡/世界书明确人设 > 合理补全。人设明确写了颜色时必须原样转换，不得擅改；hair 与 eyes 必填，hair 至少包含发色和长度/发型，eyes 必须包含瞳色，缺任一项该条建档会被丢弃。
    - 如果设定没写发色、发型或瞳色，根据世界观、种族、身份、性格和其余角色设定补出简洁、协调、可长期复用的颜色与发型；这是一次性建档决定，后续不得重新随机。
-   - 建完档就直接用：同一次输出里，先在 changes 里确立该角色的固定外貌，再在图片 ${naiCharPromptsOn ? 'characters[].tag' : 'tag'} 中照抄这套外貌，并围绕它补充服装、动作、场景等其余 tag；同一张图里这套外貌只写一遍。${newCharacterNlRule}`;
+   - 建完档就直接用：同一次输出里，先在 changes 里确立该角色的固定外貌，再在图片 ${naiCharPromptsOn ? 'characters[].tag' : 'tag'} 中照抄这套外貌，并围绕它补充服装、动作、场景等其余 tag；同一张图里这套外貌只写一遍。${newCharacterNlRule}${portraitsRule}`;
   const multiCharacterBindingRule = naiCharPromptsOn
     ? '- 多人画面中，每个角色的发色、瞳色、体型、服装、物件和个人动作都必须放进各自的 characters[].tag，禁止放进 Base 或分配给其他角色。'
     : '- 多人画面中，每个角色的发色、瞳色、体型、服装、物件和个人动作都必须使用该角色的区分性称谓邻接绑定，禁止把两人的外貌特征散放成无法归属的一串公共 tag。';

@@ -1161,7 +1161,7 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       const contract = pick(await buildAutoTagMessages(context(), 1, options(), null), CONTRACT_MARK);
       expect(contract).toContain('锁定为横图，每张图都填 "landscape"');
       expect(contract).toContain('判据本次不适用');
-      expect(contract).toContain('"size":"landscape"}],"changes":[]}');
+      expect(contract).toContain('"size":"landscape"}],"changes":[{"name":"小雪","field":"new"');
       expect(contract).not.toContain('拿不准就填 "portrait"');
     } finally {
       state.restore();
@@ -1176,7 +1176,7 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       state.preset.orientationLock = 'portrait';
       let contract = pick(await buildAutoTagMessages(context(), 1, options(), null), CONTRACT_MARK);
       expect(contract).toContain('锁定为竖图，每张图都填 "portrait"');
-      expect(contract).toContain('"size":"portrait"}],"changes":[]}');
+      expect(contract).toContain('"size":"portrait"}],"changes":[{"name":"小雪","field":"new"');
 
       state.preset.orientationLock = 'auto';
       contract = pick(await buildAutoTagMessages(context(), 1, options(), null), CONTRACT_MARK);
@@ -1214,6 +1214,119 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       state.preset.naturalLanguage = false;
       state.preset.orientationLock = 'auto';
       expect(autoTagProfile()).toEqual({ naiCharPrompts: false, nl: false, lockedSize: null });
+    } finally {
+      state.restore();
+    }
+  });
+});
+
+// 人设图变体搭建档这趟车一起产出:外观 tag 由插件按档案逐字拼在变体前面,所以模型
+// 只该给服装/构图/表情/背景,且三条之间除这四项外必须完全一致。协议里没写清这层分工,
+// 模型就会把 hair/eyes 抄进变体(同一套外貌在提示词里出现两遍)或干脆只给一条。
+// portraits[].extra 还与档案 fields.extra(标志特征)同名不同义——这层歧义必须逐字划掉。
+describe('建档顺带请求 3 条人设图变体', () => {
+  function options(): AutoTagSettings {
+    return {
+      enabled: true,
+      contextMessages: 2,
+      minImages: 0,
+      maxImages: 2,
+      retryCount: 1,
+      autoGenerate: true,
+      prompts: prompts(),
+    };
+  }
+
+  /** 每条用例都会拨后端与自然语言开关:进来时快照,出去时原样放回(settings 是模块级单例)。 */
+  function snapshot() {
+    const preset = activeComfyPreset();
+    const saved = {
+      backend: settings.defaultBackend,
+      model: settings.nai.model,
+      naiNl: settings.nai.naturalLanguage,
+      presetNl: preset.naturalLanguage,
+    };
+    return {
+      restore() {
+        settings.defaultBackend = saved.backend;
+        settings.nai.model = saved.model;
+        settings.nai.naturalLanguage = saved.naiNl;
+        preset.naturalLanguage = saved.presetNl;
+      },
+    };
+  }
+
+  const CONTRACT_MARK = '你是严谨的剧情画面规划与生图提示词编写员';
+
+  async function contract(): Promise<string> {
+    const messages = await buildAutoTagMessages(context(), 1, options(), null);
+    const found = messages.find(m => m.content.startsWith(CONTRACT_MARK));
+    expect(found, CONTRACT_MARK).toBeTruthy();
+    return found!.content;
+  }
+
+  it('在每条 field:"new" 上要求恰好 3 条只差服装/构图/表情/背景的变体', async () => {
+    const state = snapshot();
+    try {
+      settings.defaultBackend = 'nai';
+      settings.nai.model = 'nai-diffusion-5-full';
+      settings.nai.naturalLanguage = true;
+      const text = await contract();
+
+      // 规则:绑定在 field:"new" 上、字段形状、恰好 3 条、只在这四项上不同
+      expect(text).toContain('每条 field:"new" 的 change');
+      expect(text).toContain('"portraits":[{"extra":"');
+      expect(text).toContain('恰好 3 条');
+      expect(text).toContain('只许在**服装、构图、表情、背景**上不同');
+      expect(text).toContain('不是三个不同角色');
+
+      // 输出示例本身必须是带 portraits 的建档条目:示例恒为空数组时模型会照抄成不建档
+      expect(text).toContain('"changes":[{"name":"小雪","field":"new"');
+      // 三条示例各自代表一种拍法(全身校服肖像 / 日常场景 / 剧情氛围),名字都要出现
+      expect(text).toContain('"portraits":[{');
+      expect(text).toContain('white sailor dress, standing, full body');
+      expect(text).toContain('casual hoodie, sitting, cafe');
+      expect(text).toContain('night street, upper body, looking back');
+      // 变体的 nl 是一句英文,跟着自然语言开关走
+      expect(text).toContain('stands full body smiling in a classroom');
+    } finally {
+      state.restore();
+    }
+  });
+
+  it('明令 portraits[].extra 不含固定外貌,并与档案 extra 字段划清界限', async () => {
+    const state = snapshot();
+    try {
+      settings.defaultBackend = 'nai';
+      settings.nai.model = 'nai-diffusion-5-full';
+      settings.nai.naturalLanguage = true;
+      const text = await contract();
+
+      // 外观由插件拼:变体里再写一遍就会在提示词里出现两套外貌
+      expect(text).toContain('不得包含任何固定外貌 tag');
+      expect(text).toContain('sex/hair/eyes/skin/body');
+      expect(text).toContain('插件会把档案里的固定外貌逐字拼在 extra 之前');
+
+      // 同名字段消歧:档案 extra = 标志特征,portraits[].extra = 服装/构图/表情/背景
+      expect(text).toContain('与角色档案的 extra 字段无关');
+      expect(text).toContain('fields.extra 是标志特征');
+      expect(text).toContain('两者同名不同义');
+    } finally {
+      state.restore();
+    }
+  });
+
+  it('tag-only 协议下变体只写 extra,一个 nl 键都不留', async () => {
+    const state = snapshot();
+    try {
+      settings.defaultBackend = 'nai';
+      settings.nai.model = 'nai-diffusion-5-full';
+      settings.nai.naturalLanguage = false;
+      const text = await contract();
+
+      expect(text).toContain('"portraits":[{"extra":"');
+      expect(text).toContain('变体只写 extra，不写 nl 键');
+      expect(text).not.toContain('"nl"');
     } finally {
       state.restore();
     }
