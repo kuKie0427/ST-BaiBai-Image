@@ -241,6 +241,11 @@ export interface NaiGenerateValues {
   seed?: number;
   /** 画幅方向;缺省竖屏(与改动前的固定默认一致)。 */
   size?: Orientation;
+  /**
+   * 除配置里启用的风格 vibe 之外,本次还要叠加的额外 vibe(当前唯一来源是「角色人设」,
+   * group 由调用方设为「角色」)。正文由 generateNaiImage 统一读取,调用方只给元数据。
+   */
+  extraVibes?: NaiVibe[];
 }
 
 /**
@@ -461,6 +466,9 @@ export function vibeModelKey(model: string): string {
   return 'v4-5full';
 }
 
+/** 单张图最多叠加几条角色人设 vibe(画面里出场角色通常不会更多,再多也只会互相打架)。 */
+export const CHAR_VIBE_CAP = 3;
+
 /** 一次 applyVibes 的结果。 */
 export interface VibeApplication {
   /** 实际叠加进 parameters 的 vibe（含配置强度与实际发送强度）。 */
@@ -475,13 +483,19 @@ export interface VibeApplication {
  * - NAI4/4.5:编码数据进 reference_image_multiple_cached(随机 cache key),强度并进
  *   reference_strength_multiple;强度总和超过 1 且开启归一化时按比例压回 1。
  * 返回实际叠加的 vibe(供随图记录)与被跳过的 vibe 名(调用方据以提示)。
+ *
+ * extraVibes = 本次额外的 vibe(角色人设,见 NaiGenerateValues.extraVibes),接在启用的
+ * 风格 vibe 之后,与它们同吃一套跳过/归一化规则和记录格式。
+ * ⚠ 早返回与模型支持性两条守卫都必须把 extraVibes 算进总数:「一条风格 vibe 都没启用」
+ * 是极常见的配置,按 active 判空会让角色 vibe 静默消失。
  */
 export function applyVibes(
   params: JsonObject,
   nai: NaiSettings,
   dataById: ReadonlyMap<string, NaiVibeData>,
+  extraVibes: readonly NaiVibe[] = [],
 ): VibeApplication {
-  const active = nai.vibes.filter(v => v.enabled);
+  const active = [...nai.vibes.filter(v => v.enabled), ...extraVibes];
   if (!active.length) return { applied: [], skipped: [] };
   if (!naiSupportsVibes(nai.model)) return { applied: [], skipped: active.map(vibe => vibe.name) };
   const applied: GenerationVibe[] = [];
@@ -636,9 +650,13 @@ export async function generateNaiImage(
   // 画师串在发请求时解析一次，快照下来随图落盘：事后配方被删/改名也不丢。
   const artist = naiArtistUsage(nai);
   const params = buildNaiParameters(nai, values);
-  const activeVibes = naiSupportsVibes(nai.model) ? nai.vibes.filter(vibe => vibe.enabled) : [];
+  const extraVibes = values.extraVibes ?? [];
+  // 本函数是 vibe 正文的唯一读取点:风格 vibe 与角色人设 vibe 一视同仁。
+  // 模型不支持时一个都不读(applyVibes 会把它们统一报成 skipped)。
+  const supported = naiSupportsVibes(nai.model);
+  const vibesToLoad = supported ? [...nai.vibes.filter(vibe => vibe.enabled), ...extraVibes] : [];
   const loaded = new Map<string, NaiVibeData>();
-  for (const vibe of activeVibes) {
+  for (const vibe of vibesToLoad) {
     try {
       const data = await loadVibeData(vibe);
       loaded.set(
@@ -655,7 +673,7 @@ export async function generateNaiImage(
       console.warn(`[柏宝绘] 读取 vibe「${vibe.name}」失败:`, error);
     }
   }
-  const { applied, skipped } = applyVibes(params, nai, loaded);
+  const { applied, skipped } = applyVibes(params, nai, loaded, extraVibes);
   if (skipped.length) {
     const reason = naiSupportsVibes(nai.model) ? '缺当前模型编码' : '当前模型不支持 Vibe Transfer';
     console.warn(`[柏宝绘] 以下 vibe 因${reason}被跳过:`, skipped);

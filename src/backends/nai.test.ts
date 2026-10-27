@@ -1,11 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   applyVibes,
   buildNaiParameters,
   BUILTIN_NAI_ARTISTS,
+  CHAR_VIBE_CAP,
   fullNegativePrompt,
   fullPositivePrompt,
+  generateNaiImage,
   isBuiltinNaiArtist,
   naiArtistPrompt,
   naiDefaultQualityTags,
@@ -43,6 +45,7 @@ function nai(overrides: Partial<NaiSettings> = {}): NaiSettings {
     seed: 0,
     varietyBoost: true,
     normalizeRefStrength: true,
+    charVibeStrength: 0.5,
     concurrency: 1,
     vibes: [],
     artistPresets: [],
@@ -601,6 +604,231 @@ describe('applyVibes', () => {
     const params = buildNaiParameters(nai(), { prompt: 'x', seed: 1 });
     applyVibes(params, nai({ vibes: [vibe({ enabled: false })] }), new Map([['v1', vibeData()]]));
     expect(params.reference_image_multiple_cached).toEqual([]);
+  });
+});
+
+/**
+ * 角色人设 vibe:由 generate.ts 按当前出场角色拼出来的额外 NaiVibe,经 generateNaiImage
+ * 读好正文后交给 applyVibes 追加在「启用的风格 vibe」之后。组名由调用方设为「角色」,
+ * 这里只验证它被原样透传进随图记录。
+ */
+describe('applyVibes:extraVibes(角色人设 vibe)', () => {
+  function charVibe(id: string, overrides: Partial<NaiVibe> = {}): NaiVibe {
+    return vibe({
+      id,
+      name: `角色-${id}`,
+      strength: 0.5,
+      group: '角色',
+      dataPath: `/user/files/${id}.json`,
+      ...overrides,
+    });
+  }
+
+  it('追加在启用的风格 vibe 之后,组名原样透传', () => {
+    const params = buildNaiParameters(nai(), { prompt: 'x', seed: 1 });
+    const { applied, skipped } = applyVibes(
+      params,
+      nai({ vibes: [vibe({ id: 's1', strength: 0.3 })] }),
+      new Map([
+        ['s1', vibeData()],
+        ['c1', vibeData()],
+        ['c2', vibeData()],
+      ]),
+      [charVibe('c1'), charVibe('c2')],
+    );
+    expect(skipped).toEqual([]);
+    expect(applied.map(v => v.id)).toEqual(['s1', 'c1', 'c2']);
+    expect(applied.map(v => v.group)).toEqual(['', '角色', '角色']);
+    const cached = params.reference_image_multiple_cached as { cache_secret_key: string; data: string }[];
+    expect(cached).toHaveLength(3);
+  });
+
+  it('归一化把风格 + 角色的总强度一起算(1 风格 0.6 + 2 角色 0.5)', () => {
+    const params = buildNaiParameters(nai(), { prompt: 'x', seed: 1 });
+    const { applied } = applyVibes(
+      params,
+      nai({ vibes: [vibe({ id: 's1', strength: 0.6 })] }),
+      new Map([
+        ['s1', vibeData()],
+        ['c1', vibeData()],
+        ['c2', vibeData()],
+      ]),
+      [charVibe('c1'), charVibe('c2')],
+    );
+    const strengths = params.reference_strength_multiple as number[];
+    expect(strengths).toHaveLength(3);
+    expect(strengths.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 6);
+    expect(applied.map(v => v.strength)).toEqual([0.6, 0.5, 0.5]);
+    expect(applied[0].effectiveStrength).toBeCloseTo(0.6 / 1.6, 6);
+    expect(applied[1].effectiveStrength).toBeCloseTo(0.5 / 1.6, 6);
+    expect(applied[2].effectiveStrength).toBeCloseTo(0.5 / 1.6, 6);
+  });
+
+  it('缺当前模型编码的角色 vibe 与风格 vibe 走同一套跳过逻辑', () => {
+    const params = buildNaiParameters(nai(), { prompt: 'x', seed: 1 });
+    const onlyV4FullEncoded = vibeData({ encodings: { v4full: { encoding: 'eQ==', infoExtracted: 1 } } });
+    const { applied, skipped } = applyVibes(
+      params,
+      nai({ vibes: [vibe({ id: 's1', name: '风格Vibe' })] }),
+      new Map([
+        ['s1', vibeData()],
+        ['c1', onlyV4FullEncoded],
+      ]),
+      [charVibe('c1', { name: '角色-旧模型' })],
+    );
+    expect(skipped).toEqual(['角色-旧模型']);
+    expect(applied.map(v => v.id)).toEqual(['s1']);
+    expect(params.reference_image_multiple_cached).toHaveLength(1);
+    expect(params.reference_strength_multiple).toEqual([0.6]);
+  });
+
+  // 回归锁:配置里一条风格 vibe 都没启用是极常见的状态。早年的 `if (!active.length) return`
+  // 会把 extraVibes 一起吞掉,导致零启用风格 vibe 的用户人设图静默失效。
+  it('零启用的风格 vibe 时,只有 extraVibes 也照样叠加', () => {
+    const params = buildNaiParameters(nai(), { prompt: 'x', seed: 1 });
+    const { applied, skipped } = applyVibes(params, nai({ vibes: [] }), new Map([['c1', vibeData()]]), [
+      charVibe('c1'),
+    ]);
+    expect(skipped).toEqual([]);
+    expect(applied).toEqual([
+      { id: 'c1', name: '角色-c1', group: '角色', strength: 0.5, effectiveStrength: 0.5 },
+    ]);
+    expect(params.reference_image_multiple_cached).toEqual([
+      { cache_secret_key: expect.any(String), data: 'ZW5jb2Rpbmc=' },
+    ]);
+    expect(params.reference_strength_multiple).toEqual([0.5]);
+  });
+
+  it('模型不支持 Vibe Transfer 时,角色 vibe 也报进 skipped 而不是静默丢掉', () => {
+    const unsupported = 'nai-diffusion-unknown' as unknown as NaiModel;
+    const settings = nai({ model: unsupported, vibes: [] });
+    const params = buildNaiParameters(settings, { prompt: 'x', seed: 1 });
+    const { applied, skipped } = applyVibes(params, settings, new Map([['c1', vibeData()]]), [
+      charVibe('c1'),
+    ]);
+    expect(applied).toEqual([]);
+    expect(skipped).toEqual(['角色-c1']);
+  });
+
+  it('extraVibes 为空数组 / undefined 时行为与改动前完全一致', () => {
+    const settings = nai({ vibes: [vibe({ id: 's1' })] });
+    const data = new Map([['s1', vibeData()]]);
+    const withUndefined = buildNaiParameters(settings, { prompt: 'x', seed: 1 });
+    const withEmpty = buildNaiParameters(settings, { prompt: 'x', seed: 1 });
+    const bare = buildNaiParameters(settings, { prompt: 'x', seed: 1 });
+
+    const a = applyVibes(withUndefined, settings, data);
+    const b = applyVibes(withEmpty, settings, data, []);
+    const c = applyVibes(bare, settings, data);
+
+    expect(b).toEqual(a);
+    expect(c).toEqual(a);
+    expect(withEmpty.reference_strength_multiple).toEqual(bare.reference_strength_multiple);
+    // cache_secret_key 每次随机,只比数据结构
+    const cachedData = (params: Record<string, unknown>) =>
+      (params.reference_image_multiple_cached as { data: string }[]).map(entry => entry.data);
+    expect(cachedData(withEmpty)).toEqual(cachedData(bare));
+  });
+
+  it('NAI3 上角色 vibe 与风格 vibe 一样发参考原图', () => {
+    const settings = nai({ model: 'nai-diffusion-3', vibes: [vibe({ id: 's1' })] });
+    const params = buildNaiParameters(settings, { prompt: 'x', seed: 1 });
+    const { applied } = applyVibes(
+      params,
+      settings,
+      new Map([
+        ['s1', vibeData()],
+        ['c1', vibeData()],
+      ]),
+      [charVibe('c1', { strength: 0.2 })],
+    );
+    expect(params.reference_image_multiple).toEqual(['aW1hZ2U=', 'aW1hZ2U=']);
+    expect(params.reference_information_extracted_multiple).toEqual([1, 1]);
+    expect(params.reference_strength_multiple).toEqual([0.6, 0.2]);
+    expect(applied.map(v => v.id)).toEqual(['s1', 'c1']);
+  });
+});
+
+describe('CHAR_VIBE_CAP', () => {
+  it('单张图最多叠 3 条角色人设 vibe', () => {
+    expect(CHAR_VIBE_CAP).toBe(3);
+  });
+});
+
+describe('generateNaiImage:extraVibes 的唯一读取点', () => {
+  const styleVibe = () => vibe({ id: 's1', dataPath: '/user/files/s1.json' });
+
+  function stubNaiFetch(files: Record<string, NaiVibeData>) {
+    const posted: { parameters: { reference_strength_multiple: number[] } }[] = [];
+    const fn = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        posted.push(JSON.parse(String(init.body)));
+        return new Response(zipSync({ 'image_0.png': strToU8('png') }).buffer as ArrayBuffer, { status: 200 });
+      }
+      const data = files[url];
+      if (!data) return new Response('', { status: 404 });
+      return new Response(JSON.stringify(data), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fn);
+    vi.stubGlobal('toastr', { warning: vi.fn(), success: vi.fn(), error: vi.fn() });
+    return { posted, fn };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('与启用的风格 vibe 一起读正文,并原地追加进请求(零启用风格 vibe 也生效)', async () => {
+    const { posted, fn } = stubNaiFetch({
+      '/user/files/s1.json': vibeData(),
+      '/user/files/c1.json': vibeData({ encodings: { 'v4-5full': { encoding: 'Y2hhcg==', infoExtracted: 1 } } }),
+    });
+    const settings = nai({ vibes: [styleVibe()] });
+    const output = await generateNaiImage(
+      settings,
+      {
+        prompt: 'x',
+        seed: 1,
+        extraVibes: [
+          vibe({
+            id: 'c1',
+            name: '角色-阿黛尔',
+            strength: 0.4,
+            group: '角色',
+            dataPath: '/user/files/c1.json',
+          }),
+        ],
+      },
+      undefined,
+    );
+
+    expect(fn.mock.calls.filter(([, init]) => init?.method !== 'POST').map(([url]) => url).sort()).toEqual([
+      '/user/files/c1.json',
+      '/user/files/s1.json',
+    ]);
+    expect(posted[0].parameters.reference_strength_multiple).toEqual([0.6, 0.4]);
+    expect(output.usage.vibes.map(v => [v.id, v.group])).toEqual([
+      ['s1', ''],
+      ['c1', '角色'],
+    ]);
+  });
+
+  it('角色 vibe 正文读不到时只跳过它,整张图照常出', async () => {
+    const { posted } = stubNaiFetch({ '/user/files/s1.json': vibeData() });
+    const settings = nai({ vibes: [styleVibe()] });
+    const output = await generateNaiImage(
+      settings,
+{
+        prompt: 'x',
+        seed: 1,
+        extraVibes: [
+          vibe({ id: 'broken', name: '角色-坏', group: '角色', dataPath: '/user/files/broken.json' }),
+        ],
+      },
+      undefined,
+    );
+    expect(posted[0].parameters.reference_strength_multiple).toEqual([0.6]);
+    expect(output.usage.vibes.map(v => v.id)).toEqual(['s1']);
   });
 });
 
