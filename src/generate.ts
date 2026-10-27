@@ -26,6 +26,7 @@ import type { ImageCharacterPrompt } from '@/autoTag/protocol';
 import { comfySimpleParams, composeNegative, composePositive, validateSimpleConfig, type SimpleGenValues } from '@/backends/comfyTemplates';
 import { generateComfyImage, randomSeed, type ComfyImageResult } from '@/backends/comfyui';
 import { generateNaiImage, naiRandomSeed, naiSupportsCharacterPrompts } from '@/backends/nai';
+import { resolveCharVibes } from '@/backends/charVibeInject';
 import { effectiveOrientation, parseSize, pickSize, type Orientation } from '@/backends/size';
 import { acquireNaiSlot } from '@/floor/genQueue';
 import type { GenerationMeta } from '@/generationMeta';
@@ -197,11 +198,20 @@ export async function generateImage(
     let result: ComfyImageResult;
     let meta: GenerationMeta;
     if (isNai) {
+      // 角色人设 vibe:NAI 专用注入(ComfyUI 静默跳过);空结果时不下键,values 形状零变化
+      const charVibes = characters.length ? resolveCharVibes(characters, settings.nai.charVibeStrength) : [];
       const output = await generateNaiImage(
         effectiveNai(),
         // characters 原样透传:不支持的模型由 buildNaiParameters 自己滤掉(同一口径
         // naiSupportsCharacterPrompts),在这儿再滤一遍只会多一处会漂的判据
-        { prompt: input.prompt, nl: input.nl ?? '', characters, seed: input.seed, size },
+        {
+          prompt: input.prompt,
+          nl: input.nl ?? '',
+          characters,
+          seed: input.seed,
+          size,
+          ...(charVibes.length ? { extraVibes: charVibes } : {}),
+        },
         signal,
         { onRetry: info => progress.onRetry?.({ attempt: info.attempt, max: info.max }) },
       );

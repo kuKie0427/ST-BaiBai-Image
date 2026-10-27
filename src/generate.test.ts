@@ -4,6 +4,8 @@ import { generateComfyImage } from '@/backends/comfyui';
 import { generateNaiImage } from '@/backends/nai';
 import { acquireNaiSlot } from '@/floor/genQueue';
 import { backendStatus, decideSeed, generateImage } from '@/generate';
+import { charPortraitLib, setGlobalCharPortraitSource } from '@/state/charPortraits';
+import { charTagLib, emptyCharFields } from '@/state/charTags';
 import { activeNaiEndpoint, newNaiEndpoint, settings, type NaiModel } from '@/state/settings';
 
 vi.mock('@/backends/nai', async importOriginal => ({
@@ -33,6 +35,9 @@ beforeEach(() => {
   vi.mocked(acquireNaiSlot).mockResolvedValue(vi.fn());
   vi.mocked(generateNaiImage).mockResolvedValue(fakeNaiOutput());
   vi.mocked(generateComfyImage).mockResolvedValue(fakeResult());
+  charTagLib.entries.length = 0;
+  charPortraitLib.entries.length = 0;
+  settings.nai.charVibeStrength = 0.5;
 });
 
 /**
@@ -346,5 +351,138 @@ describe('generateImage', () => {
     // 简易模式的固定负面 + 动态负面在 meta 里合成全文
     expect(out.meta.negative).toBe('bad');
     expect(out.meta.positive).toBe('1girl');
+  });
+});
+
+/**
+ * 角色人设 vibe 注入(NAI only,Task 8)。
+ *
+ * 种子口径:角色档案条目用 raw 外观(fields 全空 → buildEntryTag 取 raw),
+ * 人设选中项的 anchorTag 与之相同即为「未过期」。库里只塞响应式 entries,
+ * findCharTag/findCharPortrait 都从 charTagLib/charPortraitLib 读,无需 ST 上下文。
+ */
+function seedCharVibe(name: string, fingerprint = `fp_${name}`, anchorTag = `tag_${name}`): void {
+  charTagLib.entries.push({
+    name,
+    fields: emptyCharFields(),
+    raw: `tag_${name}`,
+    nl: '',
+    source: 'book',
+    desc: '',
+    history: [],
+  });
+  charPortraitLib.entries.push({
+    name,
+    variants: [],
+    selected: {
+      prompt: 'p',
+      seed: 1,
+      anchorTag,
+      thumb: '',
+      vibe: { dataPath: `u_${name}`, thumbnailPath: '', modelKeys: ['v4-5full'], fingerprint },
+    },
+  });
+}
+
+function naiCharacters(names: string[]) {
+  return names.map(name => ({ name, tag: '1girl', nl: '' }));
+}
+
+describe('generateImage: 角色人设 vibe 注入', () => {
+  it('按提示词顺序注入到场角色的完整 NaiVibe,封顶 3 条', async () => {
+    naiReady();
+    seedCharVibe('甲');
+    seedCharVibe('乙');
+    seedCharVibe('丙');
+    seedCharVibe('丁');
+    await generateImage({ prompt: 'x', characters: naiCharacters(['甲', '乙', '丙', '丁']), seed: 1 });
+    const values = vi.mocked(generateNaiImage).mock.calls[0][1];
+    expect(values.extraVibes?.map(v => v.id)).toEqual(['charv_甲', 'charv_乙', 'charv_丙']);
+    expect(values.extraVibes?.[0]).toEqual({
+      id: 'charv_甲',
+      name: '角色:甲',
+      strength: 0.5,
+      enabled: true,
+      group: '角色',
+      dataPath: 'u_甲',
+      thumbnailPath: '',
+      modelKeys: ['v4-5full'],
+      hasImage: true,
+      fingerprint: 'fp_甲',
+    });
+  });
+
+  it('过期(anchorTag 与当前档不符)与缺档案/缺人设的角色被跳过', async () => {
+    naiReady();
+    seedCharVibe('新鲜的');
+    seedCharVibe('过期的', 'fp_过期的', 'tag_老外观');
+    charPortraitLib.entries.push({ name: '没人设', variants: [], selected: null });
+    // 有档案但 charTags 里查无此名:无法核验过期,同样跳过
+    charPortraitLib.entries.push({
+      name: '查无档案',
+      variants: [],
+      selected: {
+        prompt: 'p', seed: 1, anchorTag: 'tag_查无档案', thumb: '',
+        vibe: { dataPath: 'u_查无档案', thumbnailPath: '', modelKeys: [], fingerprint: 'fp_查无档案' },
+      },
+    });
+    await generateImage({
+      prompt: 'x',
+      characters: naiCharacters(['新鲜的', '过期的', '没人设', '查无档案']),
+      seed: 1,
+    });
+    const values = vi.mocked(generateNaiImage).mock.calls[0][1];
+    expect(values.extraVibes?.map(v => v.id)).toEqual(['charv_新鲜的']);
+  });
+
+  it('同指纹去重:同一人设图只叠一次', async () => {
+    naiReady();
+    seedCharVibe('甲', 'same_fp');
+    seedCharVibe('乙', 'same_fp');
+    await generateImage({ prompt: 'x', characters: naiCharacters(['甲', '乙']), seed: 1 });
+    expect(vi.mocked(generateNaiImage).mock.calls[0][1].extraVibes).toHaveLength(1);
+  });
+
+  it('提升为全局的角色照样注入:聊天库查不到时回落全局库', async () => {
+    naiReady();
+    // 只在 charTags(合并视图)建档 + 只在全局人设库放选中项——提升后聊天副本已删的形态
+    charTagLib.entries.push({
+      name: '全局角色', fields: emptyCharFields(), raw: 'tag_全局角色',
+      nl: '', source: 'book', desc: '', history: [],
+    });
+    setGlobalCharPortraitSource(() => [{
+      name: '全局角色',
+      variants: [],
+      selected: {
+        prompt: 'p', seed: 1, anchorTag: 'tag_全局角色', thumb: '',
+        vibe: { dataPath: 'u_全局角色', thumbnailPath: '', modelKeys: ['v4-5full'], fingerprint: 'fp_全局角色' },
+      },
+    }]);
+    await generateImage({ prompt: 'x', characters: naiCharacters(['全局角色']), seed: 1 });
+    const values = vi.mocked(generateNaiImage).mock.calls[0][1];
+    expect(values.extraVibes?.map(v => v.id)).toEqual(['charv_全局角色']);
+  });
+
+  it('强度取自 settings.nai.charVibeStrength', async () => {
+    naiReady();
+    settings.nai.charVibeStrength = 0.8;
+    seedCharVibe('甲');
+    await generateImage({ prompt: 'x', characters: naiCharacters(['甲']), seed: 1 });
+    expect(vi.mocked(generateNaiImage).mock.calls[0][1].extraVibes?.[0].strength).toBe(0.8);
+  });
+
+  it('无人设可选时 values 不带 extraVibes(与既有形状零变化)', async () => {
+    naiReady();
+    const characters = [{ name: '路人', tag: '1girl', nl: '' }];
+    await generateImage({ prompt: 'x', characters, seed: 1 });
+    expect(vi.mocked(generateNaiImage).mock.calls[0][1].extraVibes).toBeUndefined();
+  });
+
+  it('ComfyUI 链路静默跳过:不查人设、不发 NAI 请求', async () => {
+    comfyReady();
+    seedCharVibe('甲');
+    await generateImage({ prompt: 'x', characters: naiCharacters(['甲']), seed: 1 });
+    expect(vi.mocked(generateComfyImage)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(generateNaiImage)).not.toHaveBeenCalled();
   });
 });
