@@ -34,6 +34,20 @@ vi.mock('@/components/BbiTextarea.vue', () => ({
       }),
   },
 }));
+// 内存渲染器没有 Teleport 的 nodeOps,确认弹窗换成平铺 stub
+vi.mock('@/components/ConfirmDialog.vue', () => ({
+  default: {
+    props: ['open', 'title', 'confirmText', 'cancelText', 'tone', 'confirmIcon', 'busy', 'busyText', 'topLayer'],
+    emits: ['update:open', 'confirm', 'cancel'],
+    setup: (props: { open: boolean; confirmText?: string; cancelText?: string }, { emit }: { emit: (event: string, value?: boolean) => void }) => () =>
+      props.open
+        ? h('div', { class: 'fake-confirm' }, [
+            h('button', { class: 'fake-confirm-cancel', onClick: () => emit('update:open', false) }, props.cancelText ?? '取消'),
+            h('button', { class: 'fake-confirm-ok', onClick: () => emit('confirm') }, props.confirmText ?? '确定'),
+          ])
+        : null,
+  },
+}));
 vi.mock('@/generate', () => ({ backendStatus: vi.fn() }));
 vi.mock('@/backends/charPortraitVibe', () => ({ generatePortraitCandidates: vi.fn(), commitPortrait: vi.fn() }));
 vi.mock('@/api/client', () => ({ requestCompletion: vi.fn(), requestViaMainApi: vi.fn() }));
@@ -140,12 +154,12 @@ function candidate(prompt: string, seed: number): PortraitCandidate {
 }
 
 let app: ReturnType<typeof renderer.createApp> | undefined;
-let events: { close: number; committed: unknown[] };
+let events: { close: number; committed: unknown[]; removed: number };
 
 async function mount(props: Record<string, unknown> = {}): Promise<TestNode> {
   app?.unmount();
   const root = node('root');
-  events = { close: 0, committed: [] };
+  events = { close: 0, committed: [], removed: 0 };
   app = renderer.createApp(ClientModal, {
     open: true,
     name: '阿黛尔',
@@ -158,6 +172,9 @@ async function mount(props: Record<string, unknown> = {}): Promise<TestNode> {
     },
     onCommitted: (value: unknown) => {
       events.committed.push(value);
+    },
+    onRemoved: () => {
+      events.removed++;
     },
   });
   app.provide(ssrContextKey, {});
@@ -229,6 +246,31 @@ describe('PortraitModal', () => {
     const pill = find(root, '.bbi-portrait-pill.is-stale');
     expect(pill.map(node => text(node).trim())).toEqual(['人设图已过期']);
     expect(text(find(root, '.bbi-portrait-anchor')[0])).toContain('long blue hair');
+    expect(find(root, '.bbi-portrait-remove')).toHaveLength(1);
+  });
+
+  it('删除人设图 asks for confirmation, then emits removed and stays open', async () => {
+    const bare = await mount();
+    expect(find(bare, '.bbi-portrait-remove')).toHaveLength(0);
+
+    const root = await mount({
+      selected: {
+        prompt: 'p',
+        seed: 2,
+        anchorTag: 'long silver hair, red eyes',
+        thumb: 'data:image/jpeg;base64,T',
+        vibe: { dataPath: 'f', thumbnailPath: '', modelKeys: ['m'], fingerprint: 'fp' },
+      },
+    });
+
+    await click(find(root, '.bbi-portrait-remove')[0]);
+    await flush();
+    const confirmButtons = find(root, '.fake-confirm-ok');
+    expect(confirmButtons.map(button => text(button))).toEqual(['删除']);
+    await click(confirmButtons[0]);
+    await flush();
+    expect(events.removed).toBe(1);
+    expect(events.close).toBe(0);
   });
 
   it('renders finished candidates from the store and marks the ready slot', async () => {

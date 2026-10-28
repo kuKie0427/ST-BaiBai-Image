@@ -6,6 +6,7 @@ import { injectMenuButton } from '@/menu';
 import { registerPublicInterface } from '@/public/register';
 import { bindCharPortraitSync } from '@/state/charPortraits';
 import { initGlobalCharPortraits } from '@/state/charPortraitsGlobal';
+import { initPortraitVibeSweep } from '@/state/charPortraitVibeIndex';
 import { bindCharTagSync } from '@/state/charTags';
 import { initGlobalCharTags } from '@/state/globalCharTags';
 import { hydrateSettings } from '@/state/settings';
@@ -103,6 +104,9 @@ async function hydrateWhenReady(attempt = 0) {
       initGlobalCharPortraits();
       bindCharTagSync();
       bindCharPortraitSync();
+      // 人设图 vibe 孤儿清扫:必须在 bindCharPortraitSync 之后,CHAT_CHANGED 时
+      // 聊天库已 hydrate,清扫才能拿到正确的引用集
+      initPortraitVibeSweep();
       ensureImageTagRegexRegistered();
       bindAutoTagging();
       bindFloorHydration();

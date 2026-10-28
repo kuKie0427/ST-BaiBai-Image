@@ -3,6 +3,7 @@ import { reactive } from 'vue';
 import { deleteVibeData } from '@/backends/vibeStore';
 import {
   charPortraitLib,
+  clearSelected,
   findCharPortrait,
   normalizeCharPortraitStore,
   removePortrait,
@@ -23,9 +24,10 @@ import {
  * 依赖方向:本模块 → charPortraits(归一化/CRUD/查找);charPortraits → 本模块只经
  * setGlobalCharPortraitSource 注入的只读 getter,不成模块环(与 charTags ↔ globalCharTags 同构)。
  *
- * 孤儿 vibe 文件风险(已知且接受):删除聊天会连 chatMetadata 一起删,本聊天的人设图条目随
- * chatMetadata 整份消失,但 user/files 里的 vibe 正文与缩略图不跟着删 —— 条目没了,插件的记录里
- * 再也查不到那个 dataPath,只能靠用户手动清理服务器文件。全局条目存在 extensionSettings,不受影响。
+ * 孤儿 vibe 文件风险:删除聊天会连 chatMetadata 一起删,本聊天的人设图条目随
+ * chatMetadata 整份消失,但 user/files 里的 vibe 正文与缩略图不跟着删。缓解:
+ * charPortraitVibeIndex.ts 在每次选图落盘时把 vibe 文件登记进 extensionSettings,
+ * 切聊天/删聊天时清扫无引用的登记项(见该模块注释)。全局条目存在 extensionSettings,不受影响。
  */
 
 const GLOBAL_KEY = 'baibai_image_char_portraits_global';
@@ -179,25 +181,12 @@ export interface CleanupPortraitOptions {
  * 删条目必定成功;vibe 二进制尽力删 —— 但若另一个库条目仍引用同一个 dataPath(提升后同名共存、
  * 或用户手工复制出的两份),保留文件,避免删掉别人正在用的 vibe。
  */
-export async function cleanupPortrait(name: string, opts: CleanupPortraitOptions = {}): Promise<boolean> {
-  const clean = cleanName(name);
-  if (!clean) return false;
-  const chatEntry = findCharPortrait(clean);
-  const globalEntry = opts.global ? findGlobalPortrait(clean) : undefined;
-  if (!chatEntry && !globalEntry) return false;
-
-  const candidates: CharPortraitVibeRef[] = [];
-  const push = (entry: CharPortraitEntry | undefined) => {
-    if (!entry?.selected) return;
-    if (candidates.some(candidate => candidate.dataPath === entry.selected?.vibe.dataPath)) return;
-    candidates.push(entry.selected.vibe);
-  };
-  push(chatEntry);
-  push(globalEntry);
-
-  if (opts.global) removeGlobalPortrait(clean);
-  removePortrait(clean);
-
+/**
+ * 从候选 vibe 里删掉已无人引用的文件。引用 = 全局库或本聊天库任一 selected 指向同一
+ * dataPath(提升后同名共存、或用户复制出的两份都算),有人用就保留。
+ * 文件删除尽力而为:失败只 warn,不阻塞条目层面的清理结果。
+ */
+async function deleteUnreferencedVibes(candidates: CharPortraitVibeRef[]): Promise<void> {
   for (const vibe of candidates) {
     if (isVibeReferenced(vibe.dataPath)) continue;
     try {
@@ -206,6 +195,64 @@ export async function cleanupPortrait(name: string, opts: CleanupPortraitOptions
       console.warn('[柏宝绘] 人设图已删除,但 vibe 文件清理失败(可能在服务器残留)', error);
     }
   }
+}
+
+function collectVibeRefs(entries: Array<CharPortraitEntry | undefined>): CharPortraitVibeRef[] {
+  const candidates: CharPortraitVibeRef[] = [];
+  for (const entry of entries) {
+    if (!entry?.selected) continue;
+    if (candidates.some(candidate => candidate.dataPath === entry.selected?.vibe.dataPath)) continue;
+    candidates.push(entry.selected.vibe);
+  }
+  return candidates;
+}
+
+export async function cleanupPortrait(name: string, opts: CleanupPortraitOptions = {}): Promise<boolean> {
+  const clean = cleanName(name);
+  if (!clean) return false;
+  const chatEntry = findCharPortrait(clean);
+  const globalEntry = opts.global ? findGlobalPortrait(clean) : undefined;
+  if (!chatEntry && !globalEntry) return false;
+
+  const candidates = collectVibeRefs([chatEntry, globalEntry]);
+
+  if (opts.global) removeGlobalPortrait(clean);
+  removePortrait(clean);
+
+  await deleteUnreferencedVibes(candidates);
+  return true;
+}
+
+/**
+ * 单独删除人设图(角色页选图弹窗「删除人设图」):只清选中项,**变体与条目保留**——
+ * 与 cleanupPortrait(随角色删除整条)相对,用户随时能用原变体重出一张。
+ * 作用域口径与选图一致:chat 只清本聊天选中项;global 清全局选中项
+ * (条目无变体残余时连条目一起删,与空条目不落盘的库规约一致)。
+ * vibe 文件按引用计数清理,口径同 cleanupPortrait。
+ */
+export async function removePortraitSelection(name: string, opts: CleanupPortraitOptions = {}): Promise<boolean> {
+  const clean = cleanName(name);
+  if (!clean) return false;
+  const chatEntry = findCharPortrait(clean);
+  const globalEntry = opts.global ? findGlobalPortrait(clean) : undefined;
+  if (!chatEntry?.selected && !globalEntry?.selected) return false;
+
+  const candidates = collectVibeRefs([chatEntry, globalEntry]);
+
+  if (globalEntry?.selected) {
+    if (globalEntry.variants.length) {
+      setGlobalPortrait({
+        name: globalEntry.name,
+        variants: globalEntry.variants.map(variant => ({ ...variant })),
+        selected: null,
+      });
+    } else {
+      removeGlobalPortrait(globalEntry.name);
+    }
+  }
+  if (chatEntry?.selected) clearSelected(clean);
+
+  await deleteUnreferencedVibes(candidates);
   return true;
 }
 

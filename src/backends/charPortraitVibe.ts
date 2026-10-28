@@ -26,6 +26,7 @@ import {
   type CharPortraitEntry,
   type CharPortraitSelected,
 } from '@/state/charPortraits';
+import { registerPortraitVibe } from '@/state/charPortraitVibeIndex';
 import { effectiveNai, settings, type NaiVibeData } from '@/state/settings';
 import { makeJpegThumbnail } from '@/st/imageFile';
 
@@ -152,6 +153,8 @@ export async function commitPortrait(input: CommitPortraitInput): Promise<CharPo
       encodings: { [modelKey]: { encoding, infoExtracted: DEFAULT_INFO_EXTRACTED } },
     };
     const paths = await saveVibeFiles(data, null, `charv_${input.name}_${Date.now()}_${++commitSeq}`);
+    // 登记进孤儿清扫账本:条目活在 chatMetadata 里,聊天一删就查无此 path,只有账本还记得
+    registerPortraitVibe(paths);
     const selected: CharPortraitSelected = {
       prompt: input.prompt,
       seed: Math.trunc(input.seed) || 0,

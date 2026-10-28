@@ -16,6 +16,7 @@ import {
   cleanupPortrait,
   findGlobalPortrait,
   promotePortraitToGlobal,
+  removePortraitSelection,
   setGlobalPortrait,
 } from '@/state/charPortraitsGlobal';
 import {
@@ -181,8 +182,19 @@ function onPortraitCommitted(): void {
   if (!target.hadChatPortrait) removePortrait(target.name);
 }
 
-/** 编辑弹窗里的「重新生成人设图」:只在已设置且已过期时出现(未设置走卡片按钮即可)。 */
-const editingPortraitStale = computed(() => {
+/**
+ * 弹窗里「删除人设图」:只清选中项,变体与角色本身保留(与删除角色的级联清理相对)。
+ * 作用域同选图口径:全局卡清全局库,聊天卡清聊天库;vibe 文件按引用计数清理。
+ */
+async function onPortraitRemoved(): Promise<void> {
+  const target = portraitTarget.value;
+  if (!target) return;
+  const removed = await removePortraitSelection(target.name, target.scope === 'global' ? { global: true } : {});
+  if (removed) toastr.success(`已删除「${target.name}」的人设图,可随时重新生成`, '柏宝绘');
+  else toastr.info(`「${target.name}」当前没有已选定的人设图`, '柏宝绘');
+}
+
+/** 编辑弹窗里的「重新生成人设图」:只在已设置且已过期时出现(未设置走卡片按钮即可)。 */const editingPortraitStale = computed(() => {
   const name = editingName.value;
   if (!name) return false;
   return portraitState(name, editingScope.value).stale;
@@ -901,8 +913,9 @@ function sourceLabel(entry: CharTagEntry): string {
       :appearance-tag="portraitTargetState?.appearanceTag ?? ''"
       :variants="portraitTargetState?.variants ?? []"
       :selected="portraitTargetState?.selected ?? null"
-      @committed="onPortraitCommitted"
-      @close="closePortrait"
+        @committed="onPortraitCommitted"
+        @removed="onPortraitRemoved"
+        @close="closePortrait"
     />
   </section>
 </template>

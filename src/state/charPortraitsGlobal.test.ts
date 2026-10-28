@@ -234,6 +234,52 @@ describe('提升为全局', () => {
   });
 });
 
+describe('removePortraitSelection(单独删除人设图)', () => {
+  it('chat 作用域:清选中项、保留变体,无引用的 vibe 文件删掉', async () => {
+    portraits.setVariants('阿黛尔', [variant('standing')]);
+    portraits.setSelected('阿黛尔', selected('1girl', 'vibes/adele.vibe.json'));
+
+    await expect(globalPortraits.removePortraitSelection('阿黛尔')).resolves.toBe(true);
+
+    const after = portraits.findCharPortrait('阿黛尔');
+    expect(after?.selected).toBeNull();
+    expect(after?.variants.map(item => item.extra)).toEqual(['standing']);
+    expect(deletedPaths()).toEqual(['vibes/adele.vibe.json']);
+  });
+
+  it('global 作用域:清全局选中项;有变体时条目保留,无变体时连条目删', async () => {
+    globalPortraits.setGlobalPortrait(entry('玩家', ['standing'], selected('1boy', 'vibes/p1.vibe.json')));
+    globalPortraits.setGlobalPortrait(entry('独行客', [], selected('1boy', 'vibes/p2.vibe.json')));
+
+    await expect(globalPortraits.removePortraitSelection('玩家', { global: true })).resolves.toBe(true);
+    expect(globalPortraits.findGlobalPortrait('玩家')?.selected).toBeNull();
+    expect(globalPortraits.findGlobalPortrait('玩家')?.variants).toHaveLength(1);
+
+    await expect(globalPortraits.removePortraitSelection('独行客', { global: true })).resolves.toBe(true);
+    expect(globalPortraits.findGlobalPortrait('独行客')).toBeUndefined();
+    expect(deletedPaths()).toEqual(['vibes/p1.vibe.json', 'vibes/p2.vibe.json']);
+  });
+
+  it('聊天副本与全局共用同一文件时,只清聊天侧选中项但文件保住', async () => {
+    const shared = selected('1girl', 'vibes/shared.vibe.json');
+    portraits.setVariants('阿黛尔', [variant('standing')]);
+    portraits.setSelected('阿黛尔', shared);
+    globalPortraits.setGlobalPortrait(entry('阿黛尔', ['standing'], { ...shared, vibe: { ...shared.vibe } }));
+
+    await expect(globalPortraits.removePortraitSelection('阿黛尔')).resolves.toBe(true);
+    expect(portraits.findCharPortrait('阿黛尔')?.selected).toBeNull();
+    expect(globalPortraits.findGlobalPortrait('阿黛尔')?.selected).not.toBeNull();
+    expect(vibeStore.deleteVibeData).not.toHaveBeenCalled();
+  });
+
+  it('没有选中项时返回 false,不碰文件', async () => {
+    portraits.setVariants('铁匠老周', [variant('at the forge')]);
+    await expect(globalPortraits.removePortraitSelection('铁匠老周')).resolves.toBe(false);
+    await expect(globalPortraits.removePortraitSelection('查无此人', { global: true })).resolves.toBe(false);
+    expect(vibeStore.deleteVibeData).not.toHaveBeenCalled();
+  });
+});
+
 describe('cleanupPortrait', () => {
   it('global=true 时删聊天条目 + 全局条目 + 对应 vibe 文件', async () => {
     portraits.setVariants('阿黛尔', [variant('standing')]);

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import type { PortraitVariant } from '@/autoTag/protocol';
 import BbiTextarea from '@/components/BbiTextarea.vue';
+import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { backendStatus } from '@/generate';
 import { isPortraitStale, type CharPortraitSelected } from '@/state/charPortraits';
-import { computed, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 import {
   cancelRewrite,
@@ -58,6 +59,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   (e: 'close'): void;
   (e: 'committed', value: CharPortraitSelected): void;
+  (e: 'removed'): void;
 }>();
 
 /** 变体内容签名:数组身份每次渲染都会变,比内容才能分清「真更新」与「父级重渲染」。 */
@@ -153,6 +155,15 @@ function slotBusy(slot: PortraitSlotState): boolean {
   return slot.phase === 'queued' || slot.phase === 'generating';
 }
 
+/* 删除人设图:只清选中项(变体保留),文件清理在父页 removePortraitSelection 里做。
+ * 不关弹窗——删完回到「未选择」,用户可能想立刻重出一张。 */
+const confirmRemoveOpen = ref(false);
+
+function onRemoveConfirmed(): void {
+  confirmRemoveOpen.value = false;
+  emit('removed');
+}
+
 function slotStatus(slot: PortraitSlotState): string {
   if (slot.phase === 'queued') return '排队中…';
   if (slot.phase === 'generating') return '生成中…';
@@ -189,6 +200,15 @@ function slotStatus(slot: PortraitSlotState): string {
             </span>
             <span v-else-if="selected" class="bbi-portrait-pill is-ok">已生效</span>
             <span v-else class="bbi-portrait-pill">未选择</span>
+            <button
+              v-if="selected"
+              class="bbi-portrait-remove"
+              type="button"
+              title="删除当前人设图(角色与提示词变体保留)"
+              @click="confirmRemoveOpen = true"
+            >
+              <Icon name="trash" :size="12" /> 删除人设图
+            </button>
           </div>
           <p v-if="selected" class="bbi-portrait-anchor">
             <span class="bbi-portrait-anchor-label">锚定外观</span>
@@ -313,6 +333,20 @@ function slotStatus(slot: PortraitSlotState): string {
         <span class="bbi-modal-foot-spacer"></span>
         <button class="bbi-btn" type="button" @click="emit('close')">关闭</button>
       </footer>
+
+      <!-- 删除确认:叠在弹窗之上 -->
+      <ConfirmDialog
+        v-model:open="confirmRemoveOpen"
+        title="删除人设图"
+        confirm-text="删除"
+        tone="danger"
+        confirm-icon="trash"
+        top-layer
+        @confirm="onRemoveConfirmed"
+      >
+        确定删除「{{ name }}」当前选定的人设图吗？对应的角色 vibe 文件会一并删除，无法恢复。
+        提示词变体与角色本身保留，可随时重新生成。
+      </ConfirmDialog>
     </div>
   </ModalMask>
 </template>
@@ -389,6 +423,24 @@ function slotStatus(slot: PortraitSlotState): string {
   color: var(--bbi-warning);
   background: var(--bbi-warning-soft);
   border-color: transparent;
+}
+.bbi-portrait-remove {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: var(--bbi-radius-sm);
+  background: transparent;
+  color: var(--bbi-ink-muted);
+  font-family: var(--bbi-font-sans);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.bbi-portrait-remove:hover {
+  color: var(--bbi-danger);
+  background: var(--bbi-danger-soft);
 }
 .bbi-portrait-anchor {
   display: flex;

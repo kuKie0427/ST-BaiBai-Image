@@ -46,7 +46,10 @@ src/
 │   │                  # AI 永不可写;提升为全局/复制回本聊天两条迁移路径
 │   ├── charPortraits.ts # ★ 角色人设图库(chatMetadata):3 条提示词变体 + 选中项(含 vibe 引用),
 │   │                  # 过期是派生量(buildEntryTag 比对),collectPortraitSeeds 供 runner 落变体
-│   └── charPortraitsGlobal.ts # 全局人设图库(extensionSettings,协议同全局角色库)+ 提升/复制/清理
+│   ├── charPortraitsGlobal.ts # 全局人设图库(extensionSettings,协议同全局角色库)+ 提升/复制/清理
+│   │                  # + removePortraitSelection(只删选中项,变体保留)
+│   └── charPortraitVibeIndex.ts # 人设图 vibe 文件登记表(extensionSettings)+ 孤儿清扫
+│                      # (切聊天对账 / CHAT_DELETED 回收,详见 §6 生命周期段)
 ├── api/
 │   └── client.ts      # LLM 请求:副 API 走 ST 服务端代理 / 跟随主 API 走 generateRaw
 ├── autoTag/           # ★ 链路 A:自动生 tag(独立 LLM 请求 → 协议校验 → 注入正文)
@@ -675,6 +678,8 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
   「重新生成人设图」(草稿有未保存的外貌改动会先拦一下,否则按旧档锚定、保存后立刻又过期)。
   `PortraitModal.vue` 三张候选并排,逐槽 重绘 / 编辑提示词(只改 extra,外观只读)/
   AI 重写(`buildPortraitRewriteMessages` 单发,外貌钉死在消息里)/ 取消;
+  已设置时「当前人设图」区给**「删除人设图」**(二次确认后 `removePortraitSelection`,
+  只清选中项、变体与角色保留,文件按引用计数清理;作用域同选图口径);
   **在点「使用这张」之前什么都不落库**,候选只活在 `portraitModalState.ts` 的模块级会话里
   (关窗不中断、重开能看到进度、逐槽 AbortController、每角色一条串行链,切聊天全清)。
   没有变体时(旧聊天/协议漏字段/手动建档)用内置三拍兜底,按钮永远可点。
@@ -682,11 +687,17 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
 - **生命周期**:提升为全局 = `promotePortraitToGlobal`(整条搬进全局库再删本聊天副本,
   vibe 文件不搬不删、两边引用同一份);反向 `copyGlobalPortraitToChat`;
   删角色 → `cleanupPortrait(name, {global})`,删条目必定成功、**vibe 文件尽力删**
-  (还有别的库条目引用同一个 `dataPath` 就保留,避免删掉别人正在用的)。
-  ⚠ **已知风险(接受)**:①**删聊天会连 `chatMetadata` 整份删**,本聊天的人设图条目随之消失,
-  但 `user/files` 里的 vibe 正文与缩略图不跟着删 —— 条目没了就再也查不到那个 `dataPath`,
-  只能用户手动清理服务器文件(全局条目在 extensionSettings,不受影响);
-  ②**换模型**:编码按 `vibeModelKey` 分组,新模型缺编码时走既有的「缺编码 → 跳过 + toastr」路径,
+  (还有别的库条目引用同一个 `dataPath` 就保留,避免删掉别人正在用的);
+  只删图不删角色 → `removePortraitSelection(name, {global})`(清选中项、变体保留)。
+  **孤儿 vibe 清扫**(`charPortraitVibeIndex.ts`):每次选图落盘把 `{dataPath → chatId}`
+  登记进 extensionSettings(`baibai_image_char_portrait_vibe_index`);切聊天时对账——
+  仍被任一库引用 → 注销登记(生死交还条目清理路径),本聊天的无引用孤儿 → 删文件
+  (覆盖重选的泄漏靠这条回收);删聊天(新版 ST 的 `CHAT_DELETED` 事件)→ 该 chatId
+  下不被全局库引用的文件全删。删文件失败保留登记下次重试;其它聊天的登记无从验证、
+  原样保留(旧版 ST 没有 `CHAT_DELETED` 时,那条腿只能靠用户日后打开对应聊天时对账)。
+  ⚠ **残余风险(接受)**:①旧版 ST 无 `CHAT_DELETED` 事件时,删掉的聊天若不再被打开,
+  其孤儿 vibe 文件不会被自动回收;②**换模型**:编码按 `vibeModelKey` 分组,新模型缺编码时
+  走既有的「缺编码 → 跳过 + toastr」路径,
   不会炸生成,但该角色的人设 vibe 那张图就用不上了(需要重选一次人设图重新编码);
   ③**v1 只支持 NAI**:ComfyUI 静默跳过(不读 characters、不注入),弹窗侧直接禁用并提示。
 
