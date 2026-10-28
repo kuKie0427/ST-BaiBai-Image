@@ -84,7 +84,7 @@ const windowStyle = computed(() => {
 </script>
 
 <template>
-  <div class="bbi-root" :data-theme="ui.theme">
+  <div class="bbi-root" :data-theme="ui.theme" :class="{ 'bbi-no-blur': !ui.overlayBlur }">
     <!-- 弹窗 Teleport 宿主:.bbi-root 直接子级,在 .bbi-body 滚动容器之外。
          各页弹窗 Teleport 到此,避开 iOS「可滚动祖先内 fixed 后代定位错乱」(详见 state/ui.ts)。 -->
     <div ref="modalHost"></div>

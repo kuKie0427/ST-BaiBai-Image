@@ -603,6 +603,12 @@ async function confirmUpdate() {
         <p class="bbi-field-hint">移动端再点一下当前所在页的导航按钮即可关闭整个窗口,省得去够右上角的 ×。怕误触可关。</p>
 
         <label class="bbi-switch-row">
+          <span class="bbi-field-label">窗口背景模糊</span>
+          <input v-model="ui.overlayBlur" type="checkbox" class="bbi-checkbox" />
+        </label>
+        <p class="bbi-field-hint">关闭后窗口背景不再模糊(卡顿设备建议关闭)。</p>
+
+        <label class="bbi-switch-row">
           <span class="bbi-field-label">在 ST 顶栏显示按钮</span>
           <input v-model="ui.showTopBar" type="checkbox" class="bbi-checkbox" />
         </label>

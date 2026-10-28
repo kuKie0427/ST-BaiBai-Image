@@ -43,6 +43,16 @@
   padding: 24px;
 }
 
+/* —— 窗口背景模糊开关(设置 · 窗口背景模糊)——
+   移动端 / 主题化 ST 上全屏 backdrop-filter 是实打实的卡顿源,关掉后改用
+   --bbi-overlay-solid(同色、更高不透明度)补偿,窗口外仍是可读的暗背景。
+   内层弹窗遮罩(.bbi-modal-mask)同款处理,见下。 */
+.bbi-no-blur .bbi-overlay,
+.bbi-no-blur .bbi-modal-mask {
+  backdrop-filter: none;
+  background: var(--bbi-overlay-solid);
+}
+
 /* —— 窗口外壳 —— */
 .bbi-window {
   position: relative;

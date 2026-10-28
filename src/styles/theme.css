@@ -68,6 +68,8 @@
   --bbi-warning-soft: oklch(0.55 0.1 75 / 0.12);
   --bbi-overlay: oklch(0.252 0.056 264 / 0.34);
   /* 遮罩 */
+  /* 关闭背景模糊时的遮罩:同色透明度拉高,补偿失去的模糊,保证窗口外仍是可读的暗背景 */
+  --bbi-overlay-solid: oklch(0.252 0.056 264 / 0.72);
   --bbi-shadow: 0 18px 48px -20px oklch(0.252 0.056 264 / 0.22),
     0 4px 12px -6px oklch(0.252 0.056 264 / 0.1);
 }
@@ -97,6 +99,8 @@
   /* 15% opacity */
   --bbi-overlay: #1F1E2499;
   /* 60% opacity */
+  --bbi-overlay-solid: #1F1E24CC;
+  /* 80% opacity,关闭背景模糊时补偿 */
   --bbi-shadow: 0 20px 56px -22px #000000A6, 0 4px 14px -8px #00000080;
 }
 
@@ -134,6 +138,8 @@
   --bbi-warning-soft: oklch(0.62 0.12 70 / 0.12);
   --bbi-overlay: oklch(0.36 0.09 330 / 0.32);
   /* 遮罩 */
+  /* 关闭背景模糊时的遮罩:同色透明度拉高,补偿失去的模糊 */
+  --bbi-overlay-solid: oklch(0.36 0.09 330 / 0.72);
   --bbi-shadow: 0 18px 48px -20px oklch(0.45 0.15 350 / 0.3),
     0 4px 12px -6px oklch(0.45 0.15 350 / 0.16);
 }
@@ -186,6 +192,8 @@
   /* 15% opacity */
   --bbi-overlay: #2C4A5266;
   /* 40% deep teal overlay */
+  --bbi-overlay-solid: #2C4A52B3;
+  /* 70% deep teal overlay,关闭背景模糊时补偿 */
   --bbi-shadow: 0 20px 56px -22px #32646033, 0 4px 14px -8px #3264601A;
 }
 
@@ -220,6 +228,8 @@
   /* 15% opacity */
   --bbi-overlay: #00000073;
   /* 45% 中性遮罩,不随 body 色反转 */
+  --bbi-overlay-solid: #000000B8;
+  /* 72% 中性遮罩,关闭背景模糊时补偿 */
   --bbi-shadow: 0 18px 48px -20px var(--SmartThemeShadowColor, #00000038),
     0 4px 12px -6px var(--SmartThemeShadowColor, #0000001a);
 }
