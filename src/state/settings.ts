@@ -339,6 +339,11 @@ export interface UiPrefs {
   /** 悬浮球基准尺寸(px,32–80,默认 48)。 */
   orbSize: number;
   /**
+   * 窗口背景模糊,默认开。关掉后全屏遮罩与内层弹窗遮罩都不再 backdrop-filter,
+   * 改用各主题的 --bbi-overlay-solid(移动端 / 主题化 ST 上模糊是卡顿源)。
+   */
+  overlayBlur: boolean;
+  /**
    * 楼层卡片主题(合法值同 theme,见 state/ui.ts 的 THEMES)。
    * 默认 'st' = 从宿主 --SmartTheme* 派生,卡片融进当前 ST 配色;
    * 想让卡片走柏宝绘品牌观感就选 night/pastel 等。与设置窗口主题(theme)分开,
@@ -1184,6 +1189,7 @@ function defaults(): ImageSettings {
       orbShape: 'bookmark',
       orbOpacity: 62,
       orbSize: 48,
+      overlayBlur: true,
       cardTheme: 'st',
       autoCollapseImages: false,
       imageDisplaySize: 'medium',
@@ -1758,6 +1764,7 @@ function normalize(raw: unknown): ImageSettings {
       typeof ru.orbSize === 'number' && Number.isFinite(ru.orbSize)
         ? Math.min(80, Math.max(32, Math.round(ru.orbSize)))
         : d.ui.orbSize,
+    overlayBlur: typeof ru.overlayBlur === 'boolean' ? ru.overlayBlur : d.ui.overlayBlur,
     cardTheme: typeof ru.cardTheme === 'string' ? ru.cardTheme : d.ui.cardTheme,
     autoCollapseImages:
       typeof ru.autoCollapseImages === 'boolean' ? ru.autoCollapseImages : d.ui.autoCollapseImages,

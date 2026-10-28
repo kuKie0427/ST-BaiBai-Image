@@ -55,6 +55,8 @@ interface UiState {
   orbOpacity: number;
   /** 悬浮球基准尺寸(px,32–80) */
   orbSize: number;
+  /** 窗口背景模糊(默认开)。关闭后全屏遮罩不再 backdrop-filter,改用更实的底色 */
+  overlayBlur: boolean;
 }
 
 /** 悬浮球形状 */
@@ -101,6 +103,7 @@ export const ui = reactive<UiState>({
   orbShape: validOrbShape(settings.ui.orbShape),
   orbOpacity: settings.ui.orbOpacity,
   orbSize: settings.ui.orbSize,
+  overlayBlur: settings.ui.overlayBlur,
 });
 
 // settings 跨设备同步值就绪后,把主题/导航回灌进 ui(覆盖 import 阶段的默认)
@@ -114,6 +117,7 @@ onSettingsReady(() => {
   ui.orbShape = validOrbShape(settings.ui.orbShape);
   ui.orbOpacity = settings.ui.orbOpacity;
   ui.orbSize = settings.ui.orbSize;
+  ui.overlayBlur = settings.ui.overlayBlur;
 });
 
 // ui 改变 → 写回 settings.ui(由 settings 的 watch 防抖落盘、跨设备同步);activePage 仍存本机。
@@ -128,6 +132,7 @@ watch(
     ui.orbShape,
     ui.orbOpacity,
     ui.orbSize,
+    ui.overlayBlur,
   ],
   () => {
     settings.ui.theme = ui.theme;
@@ -139,6 +144,7 @@ watch(
     settings.ui.orbShape = ui.orbShape;
     settings.ui.orbOpacity = ui.orbOpacity;
     settings.ui.orbSize = ui.orbSize;
+    settings.ui.overlayBlur = ui.overlayBlur;
   },
 );
 watch(
