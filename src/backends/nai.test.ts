@@ -53,6 +53,7 @@ function nai(overrides: Partial<NaiSettings> = {}): NaiSettings {
     activeArtistId: '',
     naturalLanguage: true,
     orientationLock: 'auto',
+    paramPresets: [],
     ...overrides,
   };
 }

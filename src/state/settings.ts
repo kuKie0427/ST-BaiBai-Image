@@ -240,9 +240,39 @@ export interface NaiEndpoint {
   key: string;
 }
 
+/**
+ * 一条出图参数预设:采样参数快照 + 画师串指针 + 负面词覆盖值。
+ *
+ * 语义是「一键回填」而非持续绑定:应用时把这些字段写回渠道级,写完即断开,
+ * 不存 activeParamPresetId、不锁控件——参数是持续生效的值,「来自哪个预设」
+ * 没有持续含义,回填完成使命即结束(与画师串的 activeArtistId 相反)。
+ *
+ * 画师串存指针不存内容:改库里的配方,所有引用它的预设同步受益;悬空时回落
+ * 空串(= 不使用画师串)并提示,与 normalizeNai 对 activeArtistId 的口径一致。
+ *
+ * 不进预设的字段:接入点(换站与换画风是正交维度)、seed(锁种子与「0=随机」
+ * 的日常用法冲突)、naturalLanguage/concurrency/charVibeStrength/orientationLock
+ * (提示词生成口径与运行时行为,不是采样姿态)。
+ */
+export interface NaiParamPreset {
+  id: string;
+  /** 显示名(下拉与列表用;允许重名,以 id 为键)。 */
+  name: string;
+  model: NaiModel;
+  sampler: string;
+  steps: number;
+  scale: number;
+  cfgRescale: number;
+  noiseSchedule: string;
+  varietyBoost: boolean;
+  /** 负面词覆盖值;空串 = 跟随模型官方(与渠道级同语义,原样存取)。 */
+  undesiredContent: string;
+  /** 画师串 id;空串 = 不使用。悬空由应用侧回落,存储原样保留。 */
+  artistId: string;
+}
+
 /** NAI 连接与出图参数。接入点(地址+密钥)可存多条,见 endpoints。 */
-export interface NaiSettings extends BackendConn {
-  /**
+export interface NaiSettings extends BackendConn {  /**
    * 接入点列表。**不变式:恒非空,且必含内置官方那条**(normalize 缺则补回列表首位)。
    * 官方条不可删,故 UI 不必处理「删空了怎么办」——与 ComfyUI 工作流库的恒非空同构,
    * 与画师串库的「允许为空」相反:没有地址就出不了图,它是必需品。
@@ -316,6 +346,12 @@ export interface NaiSettings extends BackendConn {
   naturalLanguage: boolean;
   /** 画幅锁(渠道级,面板上与横竖尺寸并排);语义见 size.ts 的 OrientationLock。 */
   orientationLock: OrientationLock;
+  /**
+   * 出图参数预设库(采样参数 + 画师串指针 + 负面词覆盖)。**允许为空**——
+   * 预设是用户自己攒的姿态,没有官方默认可播种(与画师串库同构)。
+   * 应用是「一键回填」语义,不存 activeParamPresetId(见 NaiParamPreset 注释)。
+   */
+  paramPresets: NaiParamPreset[];
 }
 
 /** 界面偏好里要跨设备同步的部分;activePage 等纯本机临时态不在此。 */
@@ -1143,6 +1179,27 @@ export function newNaiEndpoint(name = '新接入点'): NaiEndpoint {
   return { id: `nep_${Date.now()}_${naiEpSeq}`, name, url: '', key: '' };
 }
 
+let naiParamSeq = 0;
+
+/** 用渠道级当前参数组装一条预设(id 前缀 npp_,不与 art_/nep_/wf_/ch_ 相撞)。 */
+export function snapshotNaiParamPreset(name: string): NaiParamPreset {
+  const n = settings.nai;
+  naiParamSeq += 1;
+  return {
+    id: `npp_${Date.now()}_${naiParamSeq}`,
+    name,
+    model: n.model,
+    sampler: n.sampler,
+    steps: n.steps,
+    scale: n.scale,
+    cfgRescale: n.cfgRescale,
+    noiseSchedule: n.noiseSchedule,
+    varietyBoost: n.varietyBoost,
+    undesiredContent: n.undesiredContent,
+    artistId: n.activeArtistId,
+  };
+}
+
 function naiDefaults(): NaiSettings {
   return {
     ...backendDefaults(NAI_OFFICIAL_URL),
@@ -1173,6 +1230,8 @@ function naiDefaults(): NaiSettings {
     activeArtistId: BUILTIN_NAI_ARTISTS[0]?.id ?? '',
     naturalLanguage: true,
     orientationLock: 'auto',
+    // 预设库出生为空:不播种(理由见 NaiSettings.paramPresets 注释)
+    paramPresets: [],
   };
 }
 
@@ -1354,6 +1413,30 @@ export function activeNaiArtist(): NaiArtistPreset | null {
 export function activeNaiEndpoint(): NaiEndpoint {
   const list = settings.nai.endpoints;
   return list.find(e => e.id === settings.nai.activeEndpointId) ?? list[0] ?? officialNaiEndpoint();
+}
+
+/**
+ * 应用一条参数预设:字段写回渠道级,写完即断开(不存 activeId)。
+ * 画师串指针悬空(条目已删/跨设备未同步)时回落空串 = 不使用,返回 false 供
+ * 调用方 toastr 提示——静默换别的画师串等于每张图都变样且查不出原因。
+ * 返回值只反映悬空与否,字段本身总是应用。
+ */
+export function applyNaiParamPreset(preset: NaiParamPreset): boolean {
+  const n = settings.nai;
+  n.model = preset.model;
+  n.sampler = preset.sampler;
+  n.steps = preset.steps;
+  n.scale = preset.scale;
+  n.cfgRescale = preset.cfgRescale;
+  n.noiseSchedule = preset.noiseSchedule;
+  n.varietyBoost = preset.varietyBoost;
+  n.undesiredContent = preset.undesiredContent;
+  const artistKnown =
+    preset.artistId === '' ||
+    n.artistPresets.some(a => a.id === preset.artistId) ||
+    isBuiltinNaiArtist(preset.artistId);
+  n.activeArtistId = artistKnown ? preset.artistId : '';
+  return artistKnown;
 }
 
 /**
@@ -1590,6 +1673,32 @@ function normalizeArtistPreset(raw: unknown, seq: number): NaiArtistPreset {
 }
 
 /**
+ * 单条预设清洗:字段逐项回退(数值夹取与渠道级同口径),id 去重靠调用方——
+ * 返回 null 表示这条整体作废(非对象/无 id)。artistId 不在这里验悬空:
+ * 画师串库可删可换设备,悬空是运行时常态,由应用侧回落(见 applyNaiParamPreset)。
+ */
+function normalizeNaiParamPreset(raw: unknown): NaiParamPreset | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Partial<NaiParamPreset>;
+  const id = typeof o.id === 'string' && o.id ? o.id : '';
+  if (!id) return null;
+  const model = typeof o.model === 'string' && NAI_MODEL_VALUES.has(o.model) ? (o.model as NaiModel) : null;
+  return {
+    id,
+    name: typeof o.name === 'string' && o.name ? o.name : '未命名预设',
+    model: model ?? NAI_MODELS[0].value,
+    sampler: typeof o.sampler === 'string' && o.sampler ? o.sampler : 'k_euler',
+    steps: Math.round(clampNumber(o.steps, 28, 1, 50)),
+    scale: clampNumber(o.scale, 5.5, 0, 35),
+    cfgRescale: clampNumber(o.cfgRescale, 0, 0, 1),
+    noiseSchedule: typeof o.noiseSchedule === 'string' && o.noiseSchedule ? o.noiseSchedule : 'karras',
+    varietyBoost: typeof o.varietyBoost === 'boolean' ? o.varietyBoost : true,
+    undesiredContent: typeof o.undesiredContent === 'string' ? o.undesiredContent : '',
+    artistId: typeof o.artistId === 'string' ? o.artistId : '',
+  };
+}
+
+/**
  * 单条接入点清洗。官方条的 name/url 一律纠回内置值:UI 已禁掉改名与改址,
  * 还能出现别的值只有手改 settings.json 一途;纠回去也顺带让内置名随插件版本更新。
  * key 例外 —— 那是用户自己的密钥,内置的只是地址与名字。
@@ -1693,6 +1802,9 @@ function normalizeNai(raw: unknown, def: NaiSettings): NaiSettings {
     // 老配置缺这两个字段:回落默认 = 开着自然语言、不锁方向,即改动前的行为
     naturalLanguage: typeof o.naturalLanguage === 'boolean' ? o.naturalLanguage : def.naturalLanguage,
     orientationLock: normalizeOrientationLock(o.orientationLock),
+    paramPresets: Array.isArray(o.paramPresets)
+      ? o.paramPresets.map(normalizeNaiParamPreset).filter((p): p is NaiParamPreset => p !== null)
+      : def.paramPresets,
   };
 }
 

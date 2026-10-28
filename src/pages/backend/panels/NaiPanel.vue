@@ -34,6 +34,7 @@ import {
   vibeMetaFromData,
 } from '@/backends/vibeStore';
 import NaiArtistManager from '@/pages/backend/panels/NaiArtistManager.vue';
+import NaiParamPresetManager from '@/pages/backend/panels/NaiParamPresetManager.vue';
 import { acquireNaiSlot } from '@/floor/genQueue';
 import { makeJpegThumbnail } from '@/st/imageFile';
 import { deleteUserImage } from '@/st/images';
@@ -57,16 +58,19 @@ import { getContext } from '@/st/context';
 import {
   activeNaiArtist,
   activeNaiEndpoint,
+  applyNaiParamPreset,
   effectiveNai,
   isOfficialNaiEndpoint,
   newNaiArtist,
   newNaiEndpoint,
+  snapshotNaiParamPreset,
   NAI_MODELS,
   NAI_OFFICIAL_URL,
   ORIENTATION_LOCKS,
   settings,
   type NaiArtistPreset,
   type NaiEndpoint,
+  type NaiParamPreset,
   type NaiVibe,
 } from '@/state/settings';
 import { computed, nextTick, onMounted, ref } from 'vue';
@@ -328,6 +332,61 @@ function runArtistImport() {
   }
   toastr.success(parts.join(', '), '从智绘姬导入');
   artistImportResult.value = null;
+}
+
+/* ============ 出图参数预设库(默认参数区顶部:切换/存新/管理) ============ */
+
+/**
+ * 预设是「一键回填」:下拉选中即应用,应用完下拉回落「不使用预设」(不存
+ * activeParamPresetId,不追踪来源——参数微调即偏离,追踪只会制造脏状态)。
+ */
+const NO_PARAM_PRESET = '';
+
+const paramPresetManagerOpen = ref(false);
+
+const paramPresetOptions = computed(() => [
+  { value: NO_PARAM_PRESET, label: '不使用预设' },
+  ...settings.nai.paramPresets.map(p => ({ value: p.id, label: p.name || '未命名预设' })),
+]);
+
+function onParamPresetPick(id: string) {
+  if (id === NO_PARAM_PRESET) return;
+  const preset = settings.nai.paramPresets.find(p => p.id === id);
+  if (!preset) return;
+  applyPreset(preset);
+}
+
+/** 下拉是受控的:选完立刻弹回「不使用预设」,不留「当前=某预设」的假象。 */
+const paramPresetSel = ref(NO_PARAM_PRESET);
+
+function applyPreset(preset: NaiParamPreset) {
+  const artistKnown = applyNaiParamPreset(preset);
+  paramPresetSel.value = NO_PARAM_PRESET;
+  toastr.success(`已应用预设「${preset.name || '未命名预设'}」`, '出图参数');
+  if (!artistKnown) {
+    toastr.warning('预设指向的画师串已不存在,画师串已置为「不使用」', '出图参数');
+  }
+}
+
+/** 存当前参数为新预设:名字就地输入框,空名给默认序号名。 */
+const namingPreset = ref(false);
+const presetNameDraft = ref('');
+const presetNameInput = ref<HTMLInputElement | null>(null);
+
+function startSavePreset() {
+  presetNameDraft.value = `预设 ${settings.nai.paramPresets.length + 1}`;
+  namingPreset.value = true;
+  nextTick(() => presetNameInput.value?.focus());
+}
+
+/** Enter / 失焦都算确认;Esc 取消。 */
+function commitSavePreset() {
+  if (namingPreset.value) {
+    const name = presetNameDraft.value.trim() || `预设 ${settings.nai.paramPresets.length + 1}`;
+    settings.nai.paramPresets.push(snapshotNaiParamPreset(name));
+    toastr.success(`已保存「${name}」,可在预设下拉随时切换`, '出图参数');
+  }
+  namingPreset.value = false;
 }
 
 /* ============ 提示词:正/负面词分两级——画师串绑定值 → 渠道覆盖值 → 内置默认 ============ */
@@ -1095,6 +1154,58 @@ async function removeVibe(vibe: NaiVibe) {
       </Collapsible>
 
       <Collapsible title="默认参数" :open="false">
+        <!-- 参数预设:下拉选中即应用(应用完回落「不使用预设」);存新走就地输入框;
+             改名/删除/查看内容在管理弹窗。不锁任何控件,微调即偏离预设。 -->
+        <div class="art-row pp-row">
+          <span class="bbi-field-label">参数预设</span>
+          <input
+            v-if="namingPreset"
+            ref="presetNameInput"
+            class="bbi-input pp-name-input"
+            type="text"
+            v-model="presetNameDraft"
+            placeholder="预设名称"
+            spellcheck="false"
+            title="Enter 确认,Esc 取消"
+            @keydown.enter.prevent="commitSavePreset"
+            @keydown.esc.stop.prevent="namingPreset = false"
+            @blur="commitSavePreset"
+          />
+          <BbiSelect
+            v-else
+            class="art-select"
+            :model-value="paramPresetSel"
+            :options="paramPresetOptions"
+            aria-label="出图参数预设"
+            @update:model-value="onParamPresetPick"
+          />
+          <span v-if="!namingPreset" class="art-ops">
+            <button
+              class="bbi-icon-btn art-op"
+              type="button"
+              title="把当前参数与画师串存为新预设"
+              aria-label="存为预设"
+              @click="startSavePreset"
+            >
+              <Icon name="plus" :size="14" />
+            </button>
+            <button
+              class="bbi-icon-btn art-op"
+              type="button"
+              :disabled="!settings.nai.paramPresets.length"
+              :title="settings.nai.paramPresets.length ? '管理预设:改名、删除、查看内容' : '还没有预设'"
+              aria-label="管理预设"
+              @click="paramPresetManagerOpen = true"
+            >
+              <Icon name="grid" :size="14" />
+            </button>
+          </span>
+        </div>
+        <p class="bbi-field-hint">
+          选中即把那套采样参数与画师串写回渠道级,之后可自由微调(不影响已存预设)。
+          接入点、种子与并发不随预设切换。
+        </p>
+
         <!-- 语义配对紧凑行:双字段行两列、数字参数行四列;说明统一收进行下的一行 hint -->
         <div class="bbi-field">
           <div class="bbi-field-head">
@@ -1630,6 +1741,9 @@ async function removeVibe(vibe: NaiVibe) {
     <!-- ===== 画师串库管理器:搜索/预览图/勾选批量删除 ===== -->
     <NaiArtistManager v-model:open="artistManagerOpen" />
 
+    <!-- ===== 出图参数预设管理器:改名/删除/查看/应用 ===== -->
+    <NaiParamPresetManager v-model:open="paramPresetManagerOpen" @apply="applyPreset" />
+
     <ConfirmDialog
       v-model:open="endpointDeleteOpen"
       title="删除接入点"
@@ -1801,6 +1915,12 @@ async function removeVibe(vibe: NaiVibe) {
 .art-op:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+/* 参数预设行:与画师串行同款;名字输入框窄一些,只承担一次性命名 */
+.pp-name-input {
+  height: 30px;
+  max-width: 320px;
 }
 .art-remove:not(:disabled) {
   color: var(--bbi-danger);

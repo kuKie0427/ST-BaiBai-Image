@@ -114,6 +114,7 @@ src/
 ├── pages/             # 主窗口的分页(注册表在 pages/registry.ts)
 │   ├── backend/index.vue      # 「渠道」页:页签(webui 已隐藏)+ 各后端面板
 │   │   └── panels/            # ComfyUIPanel / NaiPanel / WebUIPanel(隐藏,代码保留)/ NaiArtistManager
+│   │                          # / NaiParamPresetManager(出图参数预设管理)
 │   ├── characters/index.vue   # 「角色管理」页:全局/本聊天两区卡片式外貌库 CRUD + 历史回滚;
 │   │   │                      # 每张卡带人设图缩略图 / 「人设图」按钮 / 「人设图已过期」药丸
 │   │   ├── PortraitModal.vue  # 人设图选图弹窗:3 张候选并排,逐槽重绘/编辑/AI 重写/取消
@@ -792,6 +793,26 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
     勾选框只服务批量删除;内置条无勾选框、只读。「复制」是内置条唯一下自定义入口。
   - **存量迁移**:纯加法,无老字段可折。老配置 hydrate 后得空库 + 空 id,正向提示词输出
     与上线前逐字节一致。
+- **NAI 出图参数预设库**:`settings.nai.paramPresets`(`NaiParamPreset[]`),**无 activeId**。
+  一条预设 = 采样七件(model/sampler/steps/scale/cfgRescale/noiseSchedule/varietyBoost)
+  + `undesiredContent` 覆盖值(空串 = 跟随官方,原样存取)+ `artistId` 画师串**指针**
+  (不复制内容——改库里的配方,所有引用它的预设同步受益)。
+  - **「一键回填」而非持续绑定**:应用 = `applyNaiParamPreset` 把字段写回渠道级,写完即断开;
+    **不存 activeParamPresetId、不锁控件**,微调即偏离(与画师串的静默偏离不同,采样参数
+    没有「生效中」的持续含义)。面板「默认参数」区顶部下拉选中即应用、选完弹回「不使用预设」;
+    「+」就地输入名字存当前(`snapshotNaiParamPreset` 拍快照);改名/删除/查看在
+    NaiParamPresetManager.vue(预设内容不可编辑——要改就调好参数再存一条)。
+  - **与画师串库同构的空态**:允许为空、不播种、无内置条(预设是用户自己攒的姿态,
+    没有官方默认;与工作流库的恒非空相反)。
+  - **悬空画师串**:`artistId` 指向的条目已删/跨设备未同步时,应用回落空串 = 不使用,
+    返回 false 供面板 toastr 提示(不静默换别的,与 normalizeNai 对 activeArtistId 同口径);
+    存储原样保留指针,条目找回来还能用。normalize 不验悬空(库可删可变,悬空是运行时常态)。
+  - **不进预设的字段**(刻意):接入点(换站与换画风正交)、seed(锁种子与「0=随机」冲突)、
+    naturalLanguage / concurrency / charVibeStrength / orientationLock(生成口径与运行行为,
+    非采样姿态)。ComfyUI 侧**没有**对应物:一套工作流 = 一套完整参数姿态,那边的库已承担此职。
+  - **存量迁移**:纯加法。老配置 hydrate 后得空库,一切输出与上线前一致。
+  有单测锁定上述口径(`settings.naiParamPreset.test.ts`:清洗边界、快照九件套、悬空回落、
+  不碰接入点/种子/并发)。
 - **Vibe 大文件**:
   - `extensionSettings['baibai_image'].nai.vibes`:仅存 `NaiVibe` 小型索引，不存原图、缩略图 dataURL 或编码正文;
   - `user/files/bbi-vibe-*.json`:原图与各模型编码正文;
@@ -1036,6 +1057,7 @@ API 对象 `Object.freeze`,一个插件改不动下一个插件拿到的东西�
 | NAI 参数 / vibe / .naiv4vibe / 智绘姬提示词预设导入 | src/backends/nai.ts + vibeStore.ts + chatu8Vibe.ts(NaiPanel 提供 UI) |
 | NAI 接入点库(多站地址+密钥切换) | src/state/settings.ts 的 `NaiEndpoint` + `activeNaiEndpoint` / `effectiveNai`(内置官方条 `nep_official` 只读,UI 在 NaiPanel.vue「配置」区) |
 | NAI 画师串库(多套保存/切换/拼在最前) | src/state/settings.ts 的 `NaiArtistPreset` + `activeNaiArtist`(拼装在 backends/nai.ts 的 `naiArtistPrompt` / `fullPositivePrompt`,UI 在 NaiPanel.vue) |
+| NAI 出图参数预设(采样参数+画师串姿态的一键回填) | src/state/settings.ts 的 `NaiParamPreset` + `snapshotNaiParamPreset` / `applyNaiParamPreset`(UI 在 NaiPanel.vue「默认参数」区 + NaiParamPresetManager.vue) |
 | 画师串库管理器(搜索/预览图/批量删除) | src/pages/backend/panels/NaiArtistManager.vue(纯逻辑在 backends/naiArtistLib.ts;内置只读库在 backends/nai.ts 的 `BUILTIN_NAI_ARTISTS`) |
 | 画师串预览图(user/images 上传/删除) | src/st/images.ts + imageFile.ts(文件夹常量 `ARTIST_PREVIEW_FOLDER`) |
 | 图库页(按角色名分组列图) | src/pages/gallery/index.vue(目录/文件列举在 st/images.ts 的 `listUserImageFolders` / `listUserImages`) |
