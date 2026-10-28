@@ -8,7 +8,11 @@ import { PLUGIN_VERSION } from '@/version';
 import { reactive } from 'vue';
 
 const CURRENT_VERSION = PLUGIN_VERSION;
-const REMOTE_MANIFEST_URL = 'https://raw.githubusercontent.com/baibai-git/ST-BaiBai-Image/main/manifest.json';
+/**
+ * 远端版本源用本仓库的发布源(fork)。曾经指上游 baibai-git,而发布全推在本 fork——
+ * 上游停在 0.3.2,检测永远判定「无更新」,升版本触发不了任何提示(2026-10 实锤)。
+ */
+const REMOTE_MANIFEST_URL = 'https://raw.githubusercontent.com/kuKie0427/ST-BaiBai-Image/main/manifest.json';
 
 export const updateState = reactive({
   current: CURRENT_VERSION,
