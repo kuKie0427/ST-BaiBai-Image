@@ -122,7 +122,9 @@ export function isNai5(model: string): boolean {
 }
 
 export function naiSupportsVibes(model: string): boolean {
-  return isNai3(model) || isNai4Family(model) || isNai5(model);
+  // V5(截至今日)官方能力表 vibetransfer:false:生图请求带 vibe 数组同样会被接口 500
+  // (编码侧见 vibeEncodeModel 的回落;官方前端对 V5 也从不发送 vibe 字段)。
+  return isNai3(model) || isNai4Family(model);
 }
 
 const NAI_V5_SAMPLERS = new Set([
@@ -749,6 +751,18 @@ function naiParamsSnapshot(params: JsonObject, nai: NaiSettings): GenerationPara
 export const VIBE_ENCODING_KEY = 'b36a8472fe418d9f80d6bb1c54e3a6e62c62936aa7bf31dae2bcf7e929f6430f';
 
 /**
+ * vibe 编码请求实际使用的 model:V5 一律回落 4.5-full。
+ *
+ * 实测(2026-10,官方站直连验证):/ai/encode-vibe 对 nai-diffusion-5-* 的 slug
+ * 直接返回 500 Internal Server Error(同一张图、同一个 Key,4-5-full 返回 200)——
+ * 接口侧根本没接 V5。官方网页能导入 vibe,是它家前端从不发 V5 slug。
+ * vibe 编码与生图模型本就解耦,统一用 4.5 编码即可。
+ */
+export function vibeEncodeModel(model: string): string {
+  return model.includes('nai-diffusion-5') ? 'nai-diffusion-4-5-full' : model;
+}
+
+/**
  * 调 /ai/encode-vibe 把参考图编码成 vibe 数据(base64)。
  * NAI4/4.5 的 vibe 必须经此编码;NAI3 不需要(直接发原图)。
  *
@@ -764,6 +778,9 @@ export async function encodeVibeImage(
   opts: { onRetry?: (info: NaiRetryInfo) => void } = {},
 ): Promise<string> {
   if (!nai.key.trim()) throw new NaiError('请先填写 NAI API Key');
+  // 请求侧回落(见 vibeEncodeModel):V5 的 slug 会被接口 500;存储侧的 modelKey
+  // 仍按调用方的 vibeModelKey(model) 记,生图读取路径零变化。
+  const encodeModel = vibeEncodeModel(model);
   return runNaiWithRetry(
     async () => {
       const resp = await fetch(naiEndpoint(nai.url, 'encode-vibe'), {
@@ -772,7 +789,7 @@ export async function encodeVibeImage(
           'Content-Type': 'application/json',
           Authorization: `Bearer ${nai.key.trim()}`,
         },
-        body: JSON.stringify({ image: imageBase64, information_extracted: infoExtracted, model }),
+        body: JSON.stringify({ image: imageBase64, information_extracted: infoExtracted, model: encodeModel }),
         signal,
       });
       if (!resp.ok) throw await naiHttpError(resp, 'vibe 编码失败');

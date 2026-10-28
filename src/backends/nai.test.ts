@@ -18,6 +18,7 @@ import {
   parseResolution,
   skipCfgAboveSigma,
   unzipNaiImage,
+  vibeEncodeModel,
   vibeModelKey,
   NaiError,
 } from '@/backends/nai';
@@ -398,17 +399,27 @@ describe('NAI V5 support', () => {
     expect(positive.use_order).toBe(true);
   });
 
-  it('uses model-specific V5 vibe encodings', () => {
+  it('V5 按「暂不支持」处理:编码键保留但生图不叠 vibe(官方能力表 vibetransfer:false)', () => {
+    // vibeModelKey 的 v5full/v5curated 键保留:.naiv4vibe 文件格式里有这两个键,
+    // 官方上线 V5 vibe 后无需迁移即可复用存量编码。
     expect(vibeModelKey('nai-diffusion-5-full')).toBe('v5full');
     expect(vibeModelKey('nai-diffusion-5-curated')).toBe('v5curated');
     const settings = nai({ model: 'nai-diffusion-5-full', vibes: [vibe({ name: 'V5 vibe' })] });
     const params = buildNaiParameters(settings, { prompt: 'x', seed: 1 });
     const data = vibeData({ encodings: { v5full: { encoding: 'djU=', infoExtracted: 1 } } });
-    expect(applyVibes(params, settings, new Map([['v1', data]])).skipped).toEqual([]);
-    expect(params.reference_image_multiple_cached).toEqual([
-      { cache_secret_key: expect.any(String), data: 'djU=' },
-    ]);
-    expect(params.reference_strength_multiple).toEqual([0.6]);
+    // 生图侧:V5 一律跳过(带 vibe 数组打 V5 会被接口 500,官方前端也从不发)
+    expect(applyVibes(params, settings, new Map([['v1', data]]))).toEqual({
+      applied: [],
+      skipped: ['V5 vibe'],
+    });
+    expect(params.reference_image_multiple_cached).toEqual([]);
+  });
+
+  it('vibeEncodeModel:V5 一律回落 4.5-full 编码(V5 slug 会被 /ai/encode-vibe 500)', () => {
+    expect(vibeEncodeModel('nai-diffusion-5-full')).toBe('nai-diffusion-4-5-full');
+    expect(vibeEncodeModel('nai-diffusion-5-curated')).toBe('nai-diffusion-4-5-full');
+    expect(vibeEncodeModel('nai-diffusion-4-5-full')).toBe('nai-diffusion-4-5-full');
+    expect(vibeEncodeModel('nai-diffusion-4-full')).toBe('nai-diffusion-4-full');
   });
 
   // 回归锁:char_captions 所在字段本就叫 v4_prompt,这套结构是 V4 时代的协议,V5 只是继承。
